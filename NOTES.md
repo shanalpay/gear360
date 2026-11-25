@@ -1,0 +1,191 @@
+# Gear 360 (SM-C200) reverse-engineering notes
+
+Goal: Linux-native control, file import, live view (→ v4l2loopback virtual webcam) and GPU stitching
+for the 2016 Samsung Gear 360, without Samsung's discontinued Android app.
+
+Device identifiers (MAC addresses, serial numbers) are redacted as `xx`. Samsung binaries, decompiled
+sources and raw captures referenced below (`apk/`, `re/`, `captures/`) are kept locally and are not
+part of this repository.
+
+## Hardware under study
+- Camera: SM-C200, firmware `SMC200GLU0AQF1` (0.83), Tizen 2.3, Linux 3.5 kernel (per ultramango/gear360reveng).
+- Phones used to observe Samsung's app: Galaxy A10e SM-A102U1 (Android 10) and Galaxy S8+ SM-G955U (Android 9).
+- Host: Linux PC with an Intel Wi-Fi card that supports Wi-Fi Direct (P2P), BlueZ 5.64.
+
+## USB (stock firmware) — files only
+PTP GetDeviceInfo (must use TransactionID 0 outside a session; send PTP class reset 0x66 first if gvfs
+left it mid-session): 33 standard MTP ops, **no InitiateCapture, capture formats = none**.
+Unknown vendor ops `0x9201`, `0x9202` (not yet probed). No webcam/UVC mode.
+
+## Samsung apps examined
+- Gear 360 Manager 1.0.22 (`com.samsung.android.samsunggear360manager`, versionCode 43), APKMirror build,
+  sha256 `9b89352f289f85ee763f77302241fcfca202ea7ef7be11420f96c53e49f49d58`.
+- Samsung Gear 360 1.4.00.9 (`com.samsung.android.gear360manager`) and Gear 360 Editor 2.6.27.50
+  (`com.sec.android.mimage.gear360editor`, Samsung's phone-side stitcher).
+- SAccessoryService 3.1.26 (bundled in the 1.0.22 APK as `assets/SAccessoryService_3.1.26_161116_User.apk`).
+- All signed by "Samsung Cert" (DMC), SHA-1 `9CA5170F381919DFE0446FCDAB18B19A143B3163`, the same key as the
+  phone's factory system apps → genuine. Decompiled with jadx 1.5.7.
+
+### Gear 360 Manager layout (`com/samsung/android/samsunggear360manager/app/`)
+| package | role |
+|---|---|
+| `btm/` | Bluetooth manager; `datatype/BTJsonSerializableMsgId.java` = JSON message catalogue |
+| `cm/` | connection manager; `modemanager/ModeClient.java` (camera "mode server" TCP **7788**), `ModeServer.java` (phone-side callback server) |
+| `pullservice/service/rvf/` | Remote ViewFinder = live view; `MyMediaExtractor`, `CustomOpaxDataExtractor` open **raw TCP sockets** to the camera; `VideoDecoderThread` decodes; `CustomM360/ACGY/XYZ/INTV/UUID` extractors parse Samsung metadata (likely gyro/accel) |
+| `pullservice/service/mobilelink/` | MobileLink file transfer (UPnP ContentDirectory / ConnectionManager) |
+
+### Bluetooth: Samsung Accessory Protocol (SAP), not plain RFCOMM
+`res/xml/accessoryservices.xml`: app `NX360_SERVER`, profile `DI_360_2DApp`, id `/system/DI_360_2D`,
+role **provider** (phone) — camera is the consumer. Transport BT. Channels **204** (high prio), **222**, **230**.
+Explains why a plain `rfcomm` bind failed in gear360reveng.
+
+### JSON commands
+Request `msgId: "cmd-req"`, arguments: `liveview`, `rvf`, `remote-shot`, `remote-release`, `config`,
+`mobilelink`, `btml`, `autoshare`, `q-autoshare`, `autotransfer`, `selectivepush`, `as-select`, `app`,
+`format`, `fw-download`, `reset`, `power-save-off`, `pro-suggest`, `bt-off`, `timeout`.
+Actions: `get`, `set`, `execute`, `disconn`, `dismiss`. Also `config-info` request/response.
+Response codes: 100 success, 101 bad JSON, 102 wrong command, 103 fail, 104 memory full, 105 already executed,
+200 unknown, 201 battery low, 204 card lock, 206 file saving, 208 no card, 209 no photo, 210 HDMI,
+211 USB, 212 movie error, 213 memory full, 214 lens check, 216 DCF full, 218 not supported during FOTA.
+Commands flow both ways: the camera sends `cmd-req {set, config, items:{mode:…}}` when its mode dial changes.
+
+## Capture method (no root)
+Developer options → Bluetooth HCI snoop log = Enabled (Samsung ignores `persist.bluetooth.btsnooplogmode`;
+"Config HCI log for external: enable=0" in dumpsys is unrelated). Retrieve with `adb bugreport` →
+`FS/data/log/bt/btsnoop_hci.log` (btsnoop v1, datalink 1002; present on the Android 10 phone, absent on Android 9).
+The 1.4 app logs every JSON message in full under logcat tag `ACM_BT_COMMAND_FLOW`.
+
+## Session 1 — Galaxy A10e (Android 10), app 1.0.22: Bluetooth works, Wi-Fi Direct fails
+
+### Gotchas
+- **Location must be ON** (`settings put secure location_mode 3`) or the app's `startDiscovery` silently never starts.
+- The app's background receiver **cancels any discovery it didn't start** (Settings scans show nothing while it runs).
+- Camera pairing mode: power on → hold Menu until "Gear 360 Manager" → press red Record; camera shows a passkey.
+
+### Camera identity (from its `info` message)
+Bluetooth name "Gear 360 (xxxx)" (last 4 hex digits of the BT MAC); Wi-Fi `B0:72:BF:xx:xx:xx`;
+Wi-Fi Direct `B2:72:BF:xx:xx:xx` (Wi-Fi MAC with the locally-administered bit set), SSID "Gear 360(xx:xx:xx)",
+**channel 1** (2412 MHz); model-version `C200GLU0AQF1_0.83`; board-revision 0.4.
+P2P provision-discovery response carries Samsung extension `static_ip=0x2931a8c0` = 192.168.49.41
+(but in session 2 the camera used 192.168.49.10).
+
+### SAP bring-up (logcat tags SAPeerDescriptionManager / SASecurityManager / SACapabilityManager)
+RFCOMM UUID **`a49eb41e-cb06-495c-9f4f-aa80a90cdf4a`** → Peer Description (PD) v2.1, peer version 0x201 (513)
+→ **SASecurityManager challenge/response** ("Send Server Challenge", "Authentication result : 105")
+→ session setup ("Send SC req", default session 1023, capex session 854) → CapEx query/rsp (checksum match)
+→ ATTACHED → camera requests service `/system/DI_360_2D`. First attempt detached once (0x101) then retried OK.
+
+### JSON over channel 204
+Envelope: `{"title","description","type":"object","properties":{...}}`; values live in
+`{"type":..,"description":<value>}` or `{"enum":<value>,"description":<code/arg>}`.
+1. PHONE `info` {wifi-direct:true(100), wifi-mac-address, device-name, app-version}
+2. PHONE `widget-info-req`; CAMERA `date-time-req` → PHONE `date-time-rsp` {date "YYYY/MM/DD", time, region "±HH:MM", summer}
+3. CAMERA `info` {model-name, model-version, channel, wifi-direct-mac, wifi-direct-ssid, board-revision, serial-number,
+   unique-number, wifi-mac, bt-mac, bt-fota-test-url, fw-type} → PHONE `info` {result success}
+4. CAMERA `config-info` {functions: 9 settings — Beep, Led indicator, Auto Power Off, Video out, Format, Reset,
+   Mode (Video/Photo/Time lapse/Looping Video), timer, Looping Video Recording Time} → PHONE `config-info` {result}
+5. CAMERA `widget-info-rsp`
+6. PHONE `cmd-req` {action: enum **execute**, description **liveview**} → CAMERA `cmd-rsp` {result success, r-code 100}
+7. (timeout) PHONE `cmd-req` {dismiss, liveview} → CAMERA `cmd-rsp` {failure, 100}
+
+### Wi-Fi Direct failure — root cause
+After `liveview execute` the phone does P2P provision discovery (PBC, config 0x80) then GO negotiation
+(app: `groupOwnerIntent=7`, `wps.setup=0` PBC); camera answers **"GO Negotiation rejected: status 1"** every time.
+Cause: the app tells the camera its P2P address via `info.wifi-mac-address`, derived from
+`WifiInfo.getMacAddress()` (old Samsung convention: Wi-Fi MAC with the locally-administered bit set), but
+**Android 10 randomizes the P2P device address**, so the camera refuses an unknown peer. Not a channel conflict
+(still fails with the phone's Wi-Fi disconnected). The app also uses a hidden Samsung
+`discoverPeers(channel, int, listener)` via reflection.
+
+## Session 2 — Galaxy S8+ (Android 9), app 1.4.00.9: everything works
+Android 9 keeps a fixed P2P address derived the old way from the Wi-Fi MAC, so the camera accepts the phone.
+
+### Flow
+1. BT/SAP as in session 1; phone `info` now also advertises `"5G-GO"` and its real Wi-Fi MAC.
+   Camera `widget-info-rsp` carries live status (record-state, recordable-time, battery, …).
+2. PHONE `cmd-req {execute, mobilelink}` → CAMERA `cmd-rsp {success,100}` → CAMERA sends
+   `device-desc-url` = `http://192.168.49.10:7676/smp_2_` (UPnP device description).
+3. Wi-Fi Direct: **phone is GO 192.168.49.1, camera client 192.168.49.10**, channel 1.
+4. UPnP (CyberGarage lib, user-agent `SEC_RVF_ML_<wifi mac>`): all control = SOAP **POST `/smp_4_` on 7676**,
+   service `urn:schemas-upnp-org:service:ContentDirectory:1`. Eventing (`/evetSub` sic) pushes state vars
+   `RVF_BATTERY_LEVEL_VALUE, RVF_REMAIN_REC_TIME_VALUE, RVF_REMAIN_SHOT_COUNT_VALUE, RVF_LAST_PHOTO_URL_VALUE,
+   RVF_BUTTON_ACTION, RVF_CHARGING_STATUS, RVF_MOVIE_RECORD_TIME, RVF_MOVIE_TOTAL_RECORD_TIME, RVF_EV_SETUP_VALUE,
+   RVF_DEVICE_ERROR_STATUS, RVF_RECORD_ERROR_STATUS`.
+5. Gallery (MobileLink/ML): `SetOperationState{StateEvent=changeToML}`, `Browse`, `X_ControllerStatus`;
+   media over HTTP **7679** (`/smpNNN….mp4`, `/smpthumbvideo….jpg`, `/smpscreenvideo….jpg`) and direct card
+   paths on **9001** (`/DCIM/100PHOTO/360_NNNN.MP4`, `…MP4_TH` thumbnails).
+6. Live view (RVF): `X_ControllerStatus{Change,Stop,RVF}` → `SetOperationState{changeToRVF}` →
+   `GetInfomation{GPSINFO=UNKNOWN}` (sic) → response lists capabilities + stream URLs:
+   **`http://192.168.49.10:7679/livestream_{high,middle,low,recording,gearvr}.avi`**.
+   Shutter: `X_TimerlOperation{OperationValue=Start}` (sic). Video: `SetStreamQuality{Quality=High}`,
+   `StartRecord` → `{RemainRecTime}`, `StopRecord` → `{RemainRecTime, AVAILSHOTS, FileURL=http://…:9001/DCIM/100PHOTO/360_NNNN.MP4, FileCount, …}`.
+   During recording the viewer switches to `livestream_recording.avi`.
+
+### GetInfomation capabilities (fw 0.83)
+Dial modes Video/Photo/Time lapse/Looping Video; EV −3.0…+3.0 step 0.1; ISO 400–6400; WB Auto/Daylight/Cloudy/
+Incandescent/Fluorescent/Aqua; HDR, WindCut, Sharpness +1/+2; SwitchLens Dual CAM / Single CAM-F / Single CAM-R;
+ViewType VR/Dual/Panoramic; StreamingRatio 2:1/1:1/16:9; StreamingInfo High 2560x1280|1920x1920|1920x1080,
+Middle 2880x1440|1440x1440|1440x860, Low 2560x1280|1280x1280|1280x720; GearVR stream 2560x1280 2:1;
+photo 7776x3888 / 5376x2688; video 3840x1920 30p, 2880x1440 30p, 2560x1280 60p/30p, 1920x960 30p;
+interval 0.5–60 s; beep, LED, auto-power-off.
+
+## Bluetooth / SAP topology (session 1 HCI log, analysed with tshark)
+- Camera SDP: UUID `a49eb41e-cb06-495c-9f4f-bb80a90cdf00` on **RFCOMM ch 2**; its service name is a BlueZ D-Bus
+  socket path (`:1.22/org/socket/server/367/1/...`) → **the camera runs BlueZ**.
+- Phone SDP: "SAP" `…bb80a90cdf00` on ch 5 and "SAP" `…aa80a90cdf4a` on ch 6.
+- Order: phone opens camera ch 2 (DLCI 4) → camera SDP-queries the phone and opens phone ch 6 (DLCI 13, the
+  `aa80…cdf4a` service = "Connection accepted on a49eb41e-…aa80a90cdf4a") on the same RFCOMM mux.
+  ⇒ a Linux host must both connect out to ch 2 **and** register an RFCOMM server for `aa80…cdf4a`
+  (BlueZ ProfileManager1 via D-Bus).
+- SAccessoryService packages: `com/samsung/accessory/{protocol,session,security,connectivity,...}`,
+  `com/samsung/discovery/pd` (peer description).
+- **Auth = WSM**: `SASecurityManager` loads `libwsm2`; `com/sec/android/WSM/ServerNative` (phone = server):
+  `init(String,String[,byte[]][,int])`, `generateClientChallenge`, `checkAndGenerateClientResponse`,
+  `recheck…`, `generateConfirmMessage`, `getESAPKey`, `getWSMEncKey`, `getWSMConfirmKey`. Native libs
+  `libwsm2.so`, `libwsm2_jni.so` (arm64-v8a and armeabi, + OpenSSL). Plan: run libwsm2 under an ARM
+  emulator (unicorn) from Python with a minimal JNI shim rather than reimplement it.
+- `libSAP_sconeW_masi*.so` = SCS ("secure connection service"); the camera's PD v0x201 "does not support SCS" → not needed.
+
+## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
+- **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
+  (any value works, e.g. `SEC_RVF_ML_00:11:22:33:44:55`). g360 sends `SEC_RVF_ML_<client_id>`.
+- `g360 info` **worked**: X_ControllerStatus → SetOperationState changeToRVF → GetInfomation returned the
+  full capability set from our own code.
+- Live stream request used by the app (`MyMediaExtractor`, raw socket): `GET /livestream_high.avi HTTP/1.1`,
+  `User-Agent: Android Linux`, `Connection: Keep-Alive` → `HTTP/1.1 206 Partial Content`,
+  `Content-Type: video/x-avi`, DLNA headers, `Connection: close`. g360 sends the same headers for the stream.
+- **Single viewer**: while the app shows its live preview our request connects but gets no bytes. With the app
+  in Gallery (P2P stays up) our own changeToRVF + GET worked: **18.3 MB / 8 s ≈ 18 Mbit/s**.
+- **Stream format = Samsung "TTTS" container (big-endian)** → parsed by `g360/ttts.py`:
+  `TTTS 0 3`, `VID0` block (w 2560, h 1280, bitrate 22,000,000, timescale 120000, + `VD00` table),
+  `AUD0`/`AU00` block, `LIST 0 movi`, then chunks `id[4] u32 size u64 pts payload`; header block length
+  counts its own 4-byte field (body = len-4). `00VD` = one **HEVC Main 4:2:0** access unit (Annex-B; the first
+  carries VPS/SPS/PPS); pts step 4004 @ 120 kHz = **29.97 fps**. No audio chunks in `high` during 8 s.
+- **Picture = dual fisheye side by side, NOT stitched** (2560x1280 for "high"). Stitching is ours to do.
+- The P2P link drops when the app idles or leaves its Camera screen; the camera's Auto Power Off default is 5 min.
+- Relaying through a running app is fragile: the link died ~1 min after **our** changeToRVF while the app sat in
+  Gallery (the app probably reacts to the mode change and tears down P2P).
+- **Force-stop test**: app killed (→ its SAP/BT session ends) → the P2P group stays up but UPnP answers
+  **503 to everyone immediately**, and the camera drops Wi-Fi after **~30 s**. ⇒ the camera binds its
+  Wi-Fi/UPnP session to a live SAP connection. A Linux driver must hold the Bluetooth SAP session open for
+  the whole Wi-Fi session (and answer camera-initiated messages on it).
+
+## Status of the g360 app
+| module | state |
+|---|---|
+| `jsonmsg` | done; builders reproduce the 1.0.22 app's bytes exactly |
+| `upnp` | live-view switch + GetInfomation verified on hardware; shutter, start/stop record, stream quality implemented from captures |
+| `transport` | `DirectTransport` + `AdbCurlTransport` (relay via a phone's curl) |
+| `ttts` | TTTS demuxer, verified against a real 8 s capture |
+| `stream` | MP4/MKV remux, ffplay window, v4l2loopback via ffmpeg (MP4 path verified offline) |
+| `bt` | identifiers only — SAP client + WSM auth are next |
+| Wi-Fi Direct (wpa_supplicant P2P, host as GO) | not started |
+| stitching (dual fisheye → equirectangular, GPU) | not started |
+
+## Open questions
+- Exact SAP framing and the WSM challenge/response (session 1 HCI + SAccessoryService decompile + emulating libwsm2).
+  This is the main blocker for a phone-free Linux driver.
+- Wi-Fi Direct: the camera joins the phone as GO; how it gets the credentials (PBC/WPS? the `5G-GO` capability?).
+- SOAP for settings (EV/ISO/WB/HDR…) — not exercised yet; find action names in the 1.4 decompile.
+- `Browse` arguments for listing files (MobileLink), and eventing subscription details.
+- Vendor MTP ops 0x9201 / 0x9202.

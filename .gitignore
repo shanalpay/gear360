@@ -1,0 +1,33 @@
+# Samsung binaries and decompiled Samsung code: not ours to redistribute
+apk/
+re/
+
+# Raw captures: photos/video, phone logs and device identifiers
+captures/
+*.btsnoop
+*.log
+*.bin
+*.avi
+*.mp4
+*.mkv
+*.hevc
+*.jpg
+*.png
+
+# Tests and fixtures are kept local (fixtures are derived from private captures)
+tests/
+
+# Scratch space
+tmp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
