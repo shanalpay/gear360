@@ -64,6 +64,20 @@ def play(src: IO[bytes]) -> int:
     return _run(["ffplay", *_QUIET, *_LOW_LATENCY, "-window_title", "Gear 360 live (dual fisheye)", *_HEVC_IN], src)
 
 
+def play_looped(src: IO[bytes]) -> int:
+    """Demux a saved stream to a temporary HEVC file and loop it in ffplay until the window is closed."""
+    import os
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".hevc", prefix="g360-replay-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            ttts.demux_video(src, f)
+        return subprocess.call(["ffplay", *_QUIET, "-window_title", "Gear 360 replay (dual fisheye, loops)",
+                                "-loop", "0", "-f", "hevc", "-framerate", "30000/1001", "-i", path])
+    finally:
+        os.unlink(path)
+
+
 def to_file(src: IO[bytes], path: str, seconds: float | None = None) -> int:
     """Remux to MP4/MKV (no re-encode)."""
     dur = ["-t", str(seconds)] if seconds else []

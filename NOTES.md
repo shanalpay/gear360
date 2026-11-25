@@ -146,6 +146,41 @@ interval 0.5–60 s; beep, LED, auto-power-off.
   emulator (unicorn) from Python with a minimal JNI shim rather than reimplement it.
 - `libSAP_sconeW_masi*.so` = SCS ("secure connection service"); the camera's PD v0x201 "does not support SCS" → not needed.
 
+## WSM authentication, running Samsung's libwsm2 on the PC (`g360/elfemu.py`, `g360/wsm.py`)
+- `libwsm2.so` (arm64) is self-contained C: exports `WSM_Server_*`, `WSM_Client_*`, `WSM_getESAPKey`, … and imports
+  only 25 libc functions (malloc, memcpy, strncmp, read, …; no OpenSSL, no JNI). Its 2.6 MB is white-box tables.
+- `g360/elfemu.py` loads it in Unicorn (maps PT_LOAD, applies RELATIVE/GLOB_DAT/JUMP_SLOT/ABS64 relocations,
+  runs `.init_array`, implements the libc imports in Python) and calls exports with AAPCS64. Loads in ~0.02 s.
+- C signatures recovered by disassembling the JNI wrappers in `libwsm2_jni.so`:
+  `WSM_{Server,Client}_init(const char *serverID, const char *clientID, const uint8_t *key_or_NULL)` → handle;
+  `WSM_Client_generateCommitment(h, out)`; `WSM_Server_generateClientChallenge(h, inout)` (in = commitment);
+  `WSM_Client_checkAndGenerateServerChallenge(h, in, out)`; `WSM_Server_checkAndGenerateClientResponse(h, in, out)`;
+  `WSM_Client_checkClientResponse(h, in)`; `WSM_getESAPKey(h)` → pointer. **Return values are status (>0 OK),
+  not lengths**; sizes are fixed per protocol version:
+  v1: challenge 70, server challenge 102, response 35, key 32 · v2: commitment 67, challenge 136, server challenge 200,
+  response 67, key 64. IDs are the Bluetooth addresses (`Server(local, remote)` / `Client(remote, local)` in
+  SASecurityManager). WSM packets start with `[version][type][len]`: v1 `00 00 46` / `00 01 66` / `00 02 23`.
+- **The SM-C200 uses WSM protocol version 1, and the camera is the WSM *server*; the host is the *client*.**
+  v1 has no commitment message: the server starts from a zeroed 70-byte buffer.
+- Self-tests pass (server ↔ client in emulation, v1 and v2: identical keys; tampered response or mismatched IDs →
+  `-6`). Our emulated client accepts the camera's real captured challenge, but in v1 that step does not verify
+  anything (tampered input is also accepted); real verification happens on the camera when it checks our reply,
+  so compatibility is only provable live.
+- Open: the library never asked for randomness (no `open`/`read`), and two runs gave the same key → it may need an
+  entropy source we do not emulate yet (getrandom syscall? daemon?). Investigate before relying on it.
+
+## SAP framing on RFCOMM (session 1 HCI, DLCI 13 = camera ↔ phone `aa80…cdf4a` channel)
+Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "Setting CRC").
+| frame | dir | body start | meaning |
+|---|---|---|---|
+| 2088 | cam→phone | `05 02 01 02 01 02 00 0f fa aa f0 aa 03 fe ff ff 02 00 0a 01 "Sband+;SAMSUNG;…"` | Peer Description, msg type 5 |
+| 2092 | phone→cam | `06 02 01 02 01 00 02 00 0f fa aa f0 aa 03 fe 27 10 02 00 0a 01 "SM-A102U1;samsung;…"` | PD response, type 6 |
+| 2094 | cam→phone | `10 00` + WSM `00 00 46 …` (70 B) | auth: client challenge (msgType 0x10, authType 0) |
+| 2095 | phone→cam | `11 00` + WSM `00 01 66 …` (102 B) | auth: server challenge (0x11 = 17) |
+| 2097 | cam→phone | `12 00` + WSM `00 02 23 …` (35 B) | auth: client response (0x12 = 18) |
+| 2098/2102 | both | `d1 c1 0f fc 01 ff ff ff ff "/System/Reserved/ServiceCapability…"` | capability exchange (plaintext) |
+| 2103– | both | session/service setup, `"/system/DI_360_2D"`, `DI_360_2DApp` | service connection |
+
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
   (any value works, e.g. `SEC_RVF_ML_00:11:22:33:44:55`). g360 sends `SEC_RVF_ML_<client_id>`.

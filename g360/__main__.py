@@ -7,6 +7,7 @@ the camera first and pass --via-adb <serial>; the phone only relays HTTP, all co
   live --play                  show the live view in a window
   live --out FILE.mp4 [--seconds]  save the live view (HEVC, dual fisheye, no re-encode)
   live --raw FILE [--seconds]  save Samsung's untouched TTTS stream
+  live --replay RAW --play     play a saved raw stream (no phone or camera needed)
   live --v4l2 /dev/video10     publish the live view as a virtual webcam (OBS)
   shoot                        take a photo
   record --seconds N           record a video on the camera's card, print the file URL
@@ -14,6 +15,7 @@ the camera first and pass --via-adb <serial>; the phone only relays HTTP, all co
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 import time
@@ -23,16 +25,47 @@ from .transport import AdbCurlTransport, DirectTransport
 from .upnp import DEFAULT_IP, Camera
 
 
+class _Prefixed(io.RawIOBase):
+    """A stream that first replays bytes already read from `rest`, then continues reading `rest`."""
+
+    def __init__(self, head: bytes, rest):
+        self._head, self._rest = head, rest
+
+    def readable(self):
+        return True
+
+    def read(self, n=-1):
+        if self._head:
+            out, self._head = (self._head, b"") if n < 0 or n >= len(self._head) else (self._head[:n], self._head[n:])
+            return out
+        return self._rest.read(n)
+
+
+def _first_bytes_or_none(src, n: int = 12):
+    """Read the first bytes of a stream; None if it ends at once, else a stream that still yields them."""
+    head = b""
+    while len(head) < n:
+        chunk = src.read(n - len(head))
+        if not chunk:
+            break
+        head += chunk
+    return _Prefixed(head, src) if head else None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="g360", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--via-adb", metavar="SERIAL", help="relay HTTP through this adb device (phone connected to the camera)")
     g.add_argument("--direct", action="store_true", help="this PC is on the camera's Wi-Fi Direct network")
     ap.add_argument("--ip", default=DEFAULT_IP, help=f"camera IP (default {DEFAULT_IP})")
+    ap.add_argument("--wait", type=float, default=90.0, metavar="SECONDS",
+                    help="wait up to this long for the camera to become reachable (default 90)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("info")
     lv = sub.add_parser("live")
     lv.add_argument("--quality", default="high", choices=["high", "middle", "low", "recording", "gearvr"])
+    lv.add_argument("--replay", metavar="RAW_FILE",
+                    help="use a saved raw stream (from --raw) instead of the camera; no phone or camera needed")
     out = lv.add_mutually_exclusive_group(required=True)
     out.add_argument("--play", action="store_true")
     out.add_argument("--out", metavar="FILE", help=".mp4/.mkv: remuxed HEVC (no re-encode)")
@@ -44,10 +77,25 @@ def main(argv: list[str] | None = None) -> int:
     rc.add_argument("--seconds", type=float, default=10.0)
     a = ap.parse_args(argv)
 
+    if a.cmd == "live" and a.replay:
+        src = open(a.replay, "rb")
+        print(f"replaying {a.replay}", file=sys.stderr)
+        if a.play:
+            return stream.play_looped(src)
+        if a.v4l2:
+            return stream.to_v4l2(src, a.v4l2)
+        if a.out:
+            return stream.to_file(src, a.out, a.seconds)
+        ap.error("--replay works with --play, --out or --v4l2")
     if not (a.via_adb or a.direct):
         ap.error("choose a transport: --via-adb SERIAL (phone relay) or --direct")
     t = AdbCurlTransport(a.via_adb) if a.via_adb else DirectTransport()
     cam = Camera(t, a.ip)
+    if not cam.wait_ready(a.wait, log=lambda m: print(m, file=sys.stderr)):
+        print("g360: camera not ready (no Wi-Fi link, or it answers 503 because no Bluetooth session owns it)",
+              file=sys.stderr)
+        return 2
+    print("camera: ready", file=sys.stderr)
 
     if a.cmd == "info":
         caps = cam.enter_live_view()
@@ -59,10 +107,21 @@ def main(argv: list[str] | None = None) -> int:
                           "remaining_shots": caps.raw.get("AVAILSHOTS"),
                           "remaining_rec_s": caps.raw.get("RemainRecTime")}, indent=2))
     elif a.cmd == "live":
-        caps = cam.enter_live_view()
-        url = caps.stream_urls.get(a.quality) or cam.stream_url(a.quality)
-        print(f"stream: {url}", file=sys.stderr)
-        src = cam.open_stream(url)
+        src = None
+        for attempt in range(1, 4):
+            caps = cam.enter_live_view()
+            url = caps.stream_urls.get(a.quality) or cam.stream_url(a.quality)
+            print(f"stream: {url} (attempt {attempt})", file=sys.stderr)
+            src = _first_bytes_or_none(cam.open_stream(url))
+            if src:
+                break
+            print("stream: camera sent no data (another viewer, or Samsung's app switched the camera "
+                  "back to gallery mode); retrying", file=sys.stderr)
+            time.sleep(2)
+        if not src:
+            print("g360: no live stream. In Samsung's app use Gallery -> PHONE tab (not Camera, not GEAR 360).",
+                  file=sys.stderr)
+            return 3
         if a.play:
             return stream.play(src)
         if a.v4l2:

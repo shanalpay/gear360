@@ -138,6 +138,26 @@ class Camera:
         return self.action("StopRecord")
 
     # ---- convenience ---------------------------------------------------------------------------
+    def wait_ready(self, timeout: float = 60.0, interval: float = 2.0, log=None) -> bool:
+        """Poll the UPnP device description until the camera answers 200 (it says 503 while no
+        Bluetooth session owns it, and is unreachable while Wi-Fi Direct is still coming up)."""
+        import time
+        end, last = time.monotonic() + timeout, None
+        while True:
+            try:
+                r = self.t.request("GET", f"http://{self.ip}:{UPNP_PORT}/smp_2_", self.headers, timeout=4)
+                state = f"HTTP {r.status}"
+                if r.status == 200:
+                    return True
+            except (ConnectionError, OSError) as e:
+                state = "unreachable"
+            if log and state != last:
+                log(f"camera: {state}, waiting...")
+                last = state
+            if time.monotonic() >= end:
+                return False
+            time.sleep(interval)
+
     def enter_live_view(self) -> Capabilities:
         """Replays the app's sequence: announce the change, switch to RVF, read capabilities."""
         self.controller_status("Change", "Stop", "RVF")

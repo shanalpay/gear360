@@ -26,6 +26,8 @@ Samsung's app; no Samsung code is included. Not affiliated with or endorsed by S
 - For now: an Android phone (Android 9 or earlier works; Android 10+ randomizes the Wi-Fi Direct address and the
   camera refuses it) with Samsung's Gear 360 app, connected to the PC with USB debugging enabled
 - Optional: `v4l2loopback` for the virtual webcam
+- For the native Bluetooth work in progress: `pip install unicorn pyelftools` and Samsung's `libwsm2.so` (arm64)
+  from the SAccessoryService APK, pointed to by `G360_LIBWSM` (not included here)
 
 ## Usage (phone relay mode)
 1. In Samsung's app, connect to the camera, open **Camera** until the preview appears, then switch to **Gallery**
@@ -56,7 +58,9 @@ in [NOTES.md](NOTES.md).
 | `g360/ttts.py` | demuxer for the live-stream container |
 | `g360/stream.py` | window / file / virtual-webcam outputs via ffmpeg |
 | `g360/transport.py` | HTTP directly or relayed through a phone's `curl` over adb |
-| `g360/bt.py` | Bluetooth identifiers (protocol client in progress) |
+| `g360/bt.py` | Bluetooth identifiers and message types (protocol client in progress) |
+| `g360/elfemu.py` | minimal AArch64 shared-library runner (Unicorn) |
+| `g360/wsm.py` | pairing authentication computed by Samsung's libwsm2 under emulation |
 | `tools/streamtest.py` | capture and analyse a few seconds of live stream through a phone |
 
 ## License
