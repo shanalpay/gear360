@@ -194,8 +194,24 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   connected back at 1.5 s, PD answered with the phone's captured bytes, server challenge computed by emulated libwsm2
   (WSM v1, `Client(serverID=camera BT addr, clientID=PC BT addr)`) in 0.09 s, camera's client response verified at
   1.87 s, 32-byte session key derived. After that the camera waits for the host to start the capability exchange.
-- After authentication the frames carry 4 extra bytes after the length-delimited body (sequence/CRC?) — read
-  `SAFrameUtils` / `SAProtocolHeaderConstants` in the SAccessoryService decompile before building those frames.
+- **Post-auth framing decoded** (SAConnection.updateConnectivityData + SAFrameworkUtils.computeCrc):
+  `u16 len | CRC16(len) | body | CRC16(body)`, CRC-16/ARC (poly 0xA001 reflected, init 0). Body = 2-byte SAP header
+  (byte0: version 3b, frame-type bit 4, session bits 9..6; byte1: session bits 5..0 <<2 | 2-bit fragmentation) +
+  payload. Verified on every captured post-auth frame. Default session 1023 carries service-connection control.
+- Capability exchange + service connection (byte-exact reproduction of the capture in `g360/sap.py`):
+  host [1023] `01 ffffffff "/System/Reserved/ServiceCapabilityDiscovery;" 0001 <capex session> 00ff03010300` →
+  camera accept → host capex query (our 5 services) → camera empty query ↔ host empty response → camera capability
+  response (`DI_360_2DApp`, `/system/DI_360_2D`) + query for `/system/DI_360_2D` → host answers
+  `NX360_SERVER` provider (agent cb0a930a) → camera [1023] service connection request: `01 <ids> "/system/DI_360_2D;"
+  u16 count, count×u16 sessions, count×u16 channels (204, 222, 230) …` → host accepts with
+  `02 <ids> name 00 u16 count sessions`. JSON then flows on the channel-204 session, each payload prefixed by 0x00.
+- **`tools/sap_session.py` (2026-11-26): full native Bluetooth session works** — authenticated at 1.2 s, Gear 360
+  service up at 1.8 s (camera picked sessions 3/4/5), JSON exchange done at 4.3 s: our `info`/`widget-info-req`,
+  camera `date-time-req` (answered), camera `info` (full identity), `config-info` (acked). Camera also sends its own
+  `widget-info-req` (unanswered → `cmd-req dismiss` ~15 s later; now answered) and a status string on channel 230:
+  `<GSIM>@[ID]StandaloneRate@[RATE]14@</GSIM>`.
+- Next: `cmd-req execute mobilelink` → camera starts Wi-Fi Direct toward the P2P address we announced in `info`;
+  host must be ready as P2P group owner (wpa_supplicant) first.
 
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
