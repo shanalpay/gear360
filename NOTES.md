@@ -181,6 +181,22 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
 | 2098/2102 | both | `d1 c1 0f fc 01 ff ff ff ff "/System/Reserved/ServiceCapability…"` | capability exchange (plaintext) |
 | 2103– | both | session/service setup, `"/system/DI_360_2D"`, `DI_360_2DApp` | service connection |
 
+## Native Bluetooth from Linux — first contact
+- PC paired with the camera through the desktop's Bluetooth settings (camera shows "Paired/Trusted"; class 0x620).
+- Camera SDP seen from the PC: `…aa80a90cdf4a` on **RFCOMM ch 1** and `…bb80a90cdf00` on **ch 2**.
+- In the phone capture, the phone's link to camera ch 2 carries **no data**; it only makes the camera connect back to
+  the host's `aa80…` service, where all SAP traffic flows.
+- `tools/sap_probe.py` reproduces that: registers `aa80…cdf4a` on RFCOMM ch 6 via BlueZ ProfileManager1, opens camera
+  ch 2 → **the camera connected back within ~0.5 s and sent its Peer Description** (type 0x05, identical to the
+  capture: `Sband+;SAMSUNG;Shealth;/Sband+;`), then waits for our type 0x06 reply.
+- Phone's reply in the capture: `06 02 01 02 01 00 02 00 0f fa aa f0 aa 03 fe 27 10 02 00 0a 01 "SM-A102U1;samsung;Galaxy A10e;SWatch;"`.
+- **`tools/sap_auth.py`: full Peer Description + WSM authentication from Linux SUCCEEDED (2026-11-26)** — camera
+  connected back at 1.5 s, PD answered with the phone's captured bytes, server challenge computed by emulated libwsm2
+  (WSM v1, `Client(serverID=camera BT addr, clientID=PC BT addr)`) in 0.09 s, camera's client response verified at
+  1.87 s, 32-byte session key derived. After that the camera waits for the host to start the capability exchange.
+- After authentication the frames carry 4 extra bytes after the length-delimited body (sequence/CRC?) — read
+  `SAFrameUtils` / `SAProtocolHeaderConstants` in the SAccessoryService decompile before building those frames.
+
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
   (any value works, e.g. `SEC_RVF_ML_00:11:22:33:44:55`). g360 sends `SEC_RVF_ML_<client_id>`.
