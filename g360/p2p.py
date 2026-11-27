@@ -33,12 +33,13 @@ def supplicant_binary() -> str:
 
 CONF = """ctrl_interface={ctrl}
 update_config=0
-device_name=g360
+country={country}
+device_name={name}
 device_type=1-0050F204-1
 manufacturer=g360
 model_name=g360
 config_methods=push_button virtual_push_button
-p2p_go_intent=15
+p2p_go_intent=7
 p2p_no_group_iface=1
 """
 
@@ -63,8 +64,9 @@ class OwnSupplicant:
     """`with OwnSupplicant("wlp0s20f3", log=log, logfile=...) as ws:` -> ws.ctrl_dir, ws.iface, ws.addr."""
 
     def __init__(self, iface: str, log=print, addr: str | None = None, logfile: str | None = None,
-                 binary: str | None = None):
+                 binary: str | None = None, device_name: str = "Linux", country: str = "US"):
         self.iface, self.log = iface, log
+        self.device_name, self.country = device_name, country
         self.binary = binary or supplicant_binary()
         self.perm = perm_addr(iface)
         self.addr = addr or laa(self.perm)
@@ -96,7 +98,7 @@ class OwnSupplicant:
             raise RuntimeError(f"cannot set {self.iface} address: {r.stderr.strip()}")
         _run("ip", "link", "set", self.iface, "up")
         conf = os.path.join(self.ctrl_dir, "g360.conf")
-        pathlib.Path(conf).write_text(CONF.format(ctrl=self.ctrl_dir))
+        pathlib.Path(conf).write_text(CONF.format(ctrl=self.ctrl_dir, name=self.device_name, country=self.country))
         out = open(self.logfile, "w") if self.logfile else subprocess.DEVNULL
         if self.logfile:
             os.chmod(self.logfile, 0o644)

@@ -253,7 +253,8 @@ class HostSession:
 
 
 def standard_json_handler(p2p_mac: str, then: Callable[[HostSession], None] | None = None,
-                          device_name: str = "Linux", settle: float = 1.0):
+                          device_name: str = "Linux", settle: float = 1.0, app_version: str = "1.4.00.9",
+                          ch_negotiation: str | None = "5G-GO"):
     """Answers the camera's JSON the way Samsung's app does (session-2 capture of app 1.4.00.9):
     info + widget-info-req -> (camera) date-time-req -> rsp; (camera) widget-info-req -> NOT answered by the
     app; (camera) info -> ack; (camera) config-info -> ack; (camera) widget-info-rsp.
@@ -262,13 +263,14 @@ def standard_json_handler(p2p_mac: str, then: Callable[[HostSession], None] | No
 
     def handler(s: HostSession, m: jsonmsg.Message | None):
         if m is None:                                   # service just came up: introduce ourselves
-            s.send_json(jsonmsg.phone_info(p2p_mac, device_name=device_name, app_version="1.0.22"))
+            s.send_json(jsonmsg.phone_info(p2p_mac, device_name=device_name, app_version=app_version,
+                                           ch_negotiation=ch_negotiation))
             s.send_json(jsonmsg.widget_info_req())
             return
         if m.msg_id == "date-time-req":
             s.send_json(jsonmsg.date_time_rsp())
         elif m.msg_id == "info" and m.value("model-name"):
-            s.send_json(jsonmsg.info_ack(app_version="1.0.22"))
+            s.send_json(jsonmsg.info_ack(app_version=app_version, ch_negotiation=ch_negotiation))
         elif m.msg_id == "config-info":
             s.send_json(jsonmsg.config_info_ack())
             done["config"] = True

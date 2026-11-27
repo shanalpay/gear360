@@ -10,8 +10,8 @@
 The Bluetooth session stays open throughout: the camera drops Wi-Fi ~30 s after it ends.
 
 Wi-Fi Direct modes (--p2p):
-  wpacli  (default, sudo) NetworkManager's wpa_supplicant over its control socket
-  own     (sudo) the Wi-Fi interface is taken from NetworkManager for the session and given the Wi-Fi MAC
+  wpacli  (sudo) NetworkManager's wpa_supplicant over its control socket
+  own     (default, sudo) the Wi-Fi interface is taken from NetworkManager for the session and given the Wi-Fi MAC
           with the locally-administered bit set; a private patched wpa_supplicant runs P2P on it, so that is
           the P2P device address the camera expects (g360.p2p; build it once with
           tools/build_wpa_supplicant.sh). Restored on exit; Wi-Fi internet drops meanwhile.
@@ -61,7 +61,7 @@ def wpa_connect(peer: str, log, timeout: float = 60, iface: str | None = None, c
                 debug_to_journal: bool = True) -> str | None:
     """Root only: drive wpa_supplicant's P2P directly over its control socket (NetworkManager's instance by
     default, or our private one), log every event, and return the group interface name if a group starts.
-    We ask to be group owner (go_intent=15), as Samsung's phone was. The camera is matched by its announced
+    GO intent 7 as in app 1.4 (`groupOwnerIntent = 7`); the camera bids 1, so this PC becomes GO, as the phone did. The camera is matched by its announced
     address or by name."""
     from g360.wpactrl import WpaCtrl
     with WpaCtrl(iface, ctrl_dir) as w:
@@ -100,8 +100,8 @@ def _wpa_connect(w, peer: str, log, timeout: float) -> str | None:
     def connect():
         nonlocal phase
         phase = "connect"
-        r = w.request(f"P2P_CONNECT {cam} pbc go_intent=15")
-        log(f"wpa: P2P_CONNECT {cam} pbc go_intent=15 -> {r}")
+        r = w.request(f"P2P_CONNECT {cam} pbc go_intent=7")
+        log(f"wpa: P2P_CONNECT {cam} pbc go_intent=7 -> {r}")
 
     while time.monotonic() < t_end:
         ev = w.event(1.0)
@@ -248,10 +248,9 @@ def session(a, log, host: str, cam: str, announce: str, wpa: dict) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--camera")
-    ap.add_argument("--p2p", choices=["own", "wpacli", "nm"], default="wpacli",
-                    help="wpacli (default, sudo): NetworkManager's wpa_supplicant over its control socket; "
-                         "own (sudo): private wpa_supplicant on the Wi-Fi interface (taken from NetworkManager "
-                         "for the session); nm: NetworkManager profile (no root, no provision discovery)")
+    ap.add_argument("--p2p", choices=["own", "wpacli", "nm"], default="own",
+                    help="own (default, sudo): private patched wpa_supplicant with the S8+ address pattern; wpacli (sudo): NetworkManager's wpa_supplicant over its control socket; "
+                         "nm: NetworkManager profile (no root, no provision discovery)")
     ap.add_argument("--iface", help="Wi-Fi interface for --p2p own (default: the first wl* interface)")
     ap.add_argument("--announce", help="override the wifi-mac-address announced to the camera")
     ap.add_argument("--profile", default="gear360-p2p")

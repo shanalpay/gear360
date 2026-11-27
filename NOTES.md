@@ -241,6 +241,21 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   (no `p2p_device=` driver param); mac80211 gives it the first unused hardware address, so its address
   cannot be chosen by changing the interface MAC.
 
+- **Address alone is not it (2026-11-27):** with a patched wpa_supplicant (tools/build_wpa_supplicant.sh) P2P ran on
+  the Wi-Fi netdev at the Wi-Fi MAC with the locally-administered bit set, announcing the plain Wi-Fi MAC — the
+  S8+'s exact pattern (announced `B0:…`, P2P device `B2:…`). PD → GO negotiation still got status 1 and no
+  camera-initiated request. (`static_ip` in the S8+'s `P2P-PROV-DISC-PBC-RESP` is only Samsung's
+  wpa_supplicant printing a vendor IE; the camera's PD response is 130 bytes to both peers.)
+- Tizen's wifi-direct-manager (open source; the camera runs Tizen): an incoming GO Negotiation Request either
+  triggers `wfd_session_connect` at once (autoconnection mode — the 25 ms reply the S8+ saw) or raises a
+  "Connection" request to the app, which decides (`TODO: Add autoconnection peer matching logic` upstream, so
+  the matching is in Samsung's camera app).
+- **Our `info` had been app-1.0.22 style** (`"wifi-direct":{"enum":"true","description":"100"}`, app-version
+  1.0.22) — what the failing A10e app sent. App 1.4.00.9 (S8+, works) sends
+  `"wifi-direct":{"enum":"true","ch-negotiation-wa":{"description":"5G-GO"}}`, app-version 1.4.00.9 and
+  `op-mode: user`, and the same `ch-negotiation-wa` in its info ack; it connects with `groupOwnerIntent = 7`.
+  g360 now sends the 1.4 form (byte-identical, tests/test_jsonmsg.py) and uses GO intent 7.
+
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
   (any value works, e.g. `SEC_RVF_ML_00:11:22:33:44:55`). g360 sends `SEC_RVF_ML_<client_id>`.

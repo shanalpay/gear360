@@ -110,16 +110,29 @@ class Message:
 # ---- builders for the messages the host (phone role) sends -------------------------------------
 
 def phone_info(p2p_mac: str, device_name: str = "Linux", app_version: str = "1.4.00.9",
-               go_5g: bool = False) -> dict:
-    """Host introduction. `p2p_mac` MUST be the Wi-Fi Direct device address the host will use —
-    the camera only accepts a P2P connection from this address (see NOTES.md, session 1 failure)."""
-    wd = _enum("true", "5G-GO") if go_5g else _enum("true", "100")
+               go_5g: bool = False, ch_negotiation: str | None = None, op_mode: str = "user") -> dict:
+    """Host introduction. `p2p_mac` is the phone's Wi-Fi MAC (`wifi-mac-address`).
+
+    App 1.4.00.9 (the version that connects, session 2) sends
+    `"wifi-direct":{"enum":"true","ch-negotiation-wa":{"description":"5G-GO"}}` plus `op-mode`: pass
+    ch_negotiation="5G-GO" (or "2.4G-GO", the app's KDDI variant). Without it the old 1.0.22 form
+    (`"wifi-direct":{"enum":"true","description":"100"}`, no op-mode) is produced."""
+    if ch_negotiation:
+        wd = {"enum": "true", "ch-negotiation-wa": {"description": ch_negotiation}}
+    else:
+        wd = _enum("true", "5G-GO") if go_5g else _enum("true", "100")
     props = {"wifi-direct": wd, "wifi-mac-address": _str(p2p_mac.upper()),
              "device-name": _str(device_name), "app-version": _str(app_version)}
+    if ch_negotiation:
+        props["op-mode"] = _str(op_mode)
     return envelope("info", props)
 
 
-def info_ack(app_version: str = "1.4.00.9") -> dict:
+def info_ack(app_version: str = "1.4.00.9", ch_negotiation: str | None = None, op_mode: str = "user") -> dict:
+    """Ack of the camera's `info`. App 1.4.00.9: `"result":{"enum":"success","ch-negotiation-wa":{...}}` + op-mode."""
+    if ch_negotiation:
+        return envelope("info", {"result": {"enum": "success", "ch-negotiation-wa": {"description": ch_negotiation}},
+                                 "app-version": _str(app_version), "op-mode": _str(op_mode)}, kind="info-rsp")
     return envelope("info", {"result": _enum("success", "100"), "app-version": _str(app_version)}, kind="info-rsp")
 
 
