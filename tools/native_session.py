@@ -12,9 +12,9 @@ The Bluetooth session stays open throughout: the camera drops Wi-Fi ~30 s after 
 Wi-Fi Direct modes (--p2p):
   wpacli  (default, sudo) NetworkManager's wpa_supplicant over its control socket
   own     (sudo) the Wi-Fi interface is taken from NetworkManager for the session and given the Wi-Fi MAC
-          with the locally-administered bit set; a private wpa_supplicant runs P2P (g360.p2p). Restored on
-          exit; Wi-Fi internet drops meanwhile. (This wpa_supplicant build still creates a dedicated
-          P2P-device wdev, which takes a hardware address, so the P2P address is not the one set.)
+          with the locally-administered bit set; a private patched wpa_supplicant runs P2P on it, so that is
+          the P2P device address the camera expects (g360.p2p; build it once with
+          tools/build_wpa_supplicant.sh). Restored on exit; Wi-Fi internet drops meanwhile.
   nm      NetworkManager profile `gear360-p2p` (no root):
             nmcli connection add type wifi-p2p con-name gear360-p2p wifi-p2p.peer <camera wifi-direct-mac> \
                 wifi-p2p.wps-method pbc ipv4.method shared ipv4.addresses 192.168.49.1/24 \

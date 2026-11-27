@@ -6,8 +6,8 @@ form their P2P device address. On Intel/mac80211 cards the dedicated P2P-device 
 address instead (bit clear) and its address cannot be changed, so the camera answers "status 1".
 
 OwnSupplicant temporarily takes the Wi-Fi interface away from NetworkManager, gives it the locally
-administered address, and runs a private wpa_supplicant *without* a dedicated P2P device
-(no `p2p_device=1`), so the P2P device address is the interface address. The group also runs on that
+administered address, and runs a private, patched wpa_supplicant (tools/build_wpa_supplicant.sh) that does
+not use a dedicated P2P device, so the P2P device address is the interface address. The group also runs on that
 interface (`p2p_no_group_iface=1`). Everything is restored on exit (address, NetworkManager control).
 """
 from __future__ import annotations
@@ -18,6 +18,18 @@ import subprocess
 import time
 
 CTRL_DIR = "/run/g360-wpa"
+# The patched build from tools/build_wpa_supplicant.sh (stock wpa_supplicant still creates a P2P-device wdev
+# with a hardware address, which defeats the point). Override with G360_WPA_SUPPLICANT.
+PATCHED = pathlib.Path(__file__).resolve().parents[1] / "tmp" / "wpa-build" / "wpa_supplicant"
+
+
+def supplicant_binary() -> str:
+    env = os.environ.get("G360_WPA_SUPPLICANT")
+    if env:
+        return env
+    if PATCHED.exists():
+        return str(PATCHED)
+    raise RuntimeError("patched wpa_supplicant not found: run tools/build_wpa_supplicant.sh (no root needed)")
 
 CONF = """ctrl_interface={ctrl}
 update_config=0
@@ -50,8 +62,10 @@ def _run(*cmd):
 class OwnSupplicant:
     """`with OwnSupplicant("wlp0s20f3", log=log, logfile=...) as ws:` -> ws.ctrl_dir, ws.iface, ws.addr."""
 
-    def __init__(self, iface: str, log=print, addr: str | None = None, logfile: str | None = None):
+    def __init__(self, iface: str, log=print, addr: str | None = None, logfile: str | None = None,
+                 binary: str | None = None):
         self.iface, self.log = iface, log
+        self.binary = binary or supplicant_binary()
         self.perm = perm_addr(iface)
         self.addr = addr or laa(self.perm)
         self.logfile = logfile
@@ -86,7 +100,7 @@ class OwnSupplicant:
         out = open(self.logfile, "w") if self.logfile else subprocess.DEVNULL
         if self.logfile:
             os.chmod(self.logfile, 0o644)
-        self.proc = subprocess.Popen(["wpa_supplicant", "-i", self.iface, "-D", "nl80211", "-c", conf, "-dd", "-t"],
+        self.proc = subprocess.Popen([self.binary, "-i", self.iface, "-D", "nl80211", "-c", conf, "-dd", "-t"],
                                      stdout=out, stderr=subprocess.STDOUT)
         sock = os.path.join(self.ctrl_dir, self.iface)
         for _ in range(100):
@@ -95,7 +109,8 @@ class OwnSupplicant:
             time.sleep(0.1)
         if not os.path.exists(sock):
             raise RuntimeError(f"private wpa_supplicant did not start (see {self.logfile})")
-        self.log(f"private wpa_supplicant on {self.iface}, Wi-Fi Direct address {self.addr} (permanent {self.perm})")
+        self.log(f"private wpa_supplicant ({self.binary}) on {self.iface}, Wi-Fi Direct address {self.addr} "
+                 f"(permanent {self.perm})")
         return self
 
     def __exit__(self, *exc):
