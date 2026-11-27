@@ -54,52 +54,63 @@ def wpa_connect(peer: str, log, timeout: float = 60) -> str | None:
     with WpaCtrl() as w:
         w.attach()
         log(f"wpa_supplicant control socket {w.iface}: attached")
-        st = dict(l.split("=", 1) for l in w.request("STATUS").splitlines() if "=" in l)
-        log(f"wpa: STATUS p2p_device_address={st.get('p2p_device_address')} wpa_state={st.get('wpa_state')}")
-        log(f"wpa: P2P_FIND 30 -> {w.request('P2P_FIND 30')}")
-        target, connect_sent, group, seen = peer.lower(), False, None, set()
-        t_start = time.monotonic()
-        t_end = t_start + timeout
+        prev = re.search(r"Current level: (\w+)", w.request("LOG_LEVEL"))
+        prev = prev.group(1) if prev else "INFO"
+        w.request("LOG_LEVEL DEBUG")     # NetworkManager's wpa_supplicant logs to syslog (-s): the journal
+        log(f"wpa_supplicant debug logging on (was {prev}): journalctl -u wpa_supplicant shows GO negotiation")
+        try:
+            return _wpa_connect(w, peer, log, timeout)
+        finally:
+            w.request(f"LOG_LEVEL {prev}")
 
-        def connect(addr):
-            nonlocal connect_sent
-            connect_sent = True
-            r = w.request(f"P2P_CONNECT {addr} pbc go_intent=15")
-            log(f"wpa: P2P_CONNECT {addr} pbc go_intent=15 -> {r}")
 
-        while time.monotonic() < t_end:
-            ev = w.event(1.0)
-            if ev is None:
-                if not connect_sent and time.monotonic() - t_start > 10:
-                    log("camera not seen in discovery after 10 s; connecting to its announced address anyway")
-                    connect(target)
+def _wpa_connect(w, peer: str, log, timeout: float) -> str | None:
+    st = dict(l.split("=", 1) for l in w.request("STATUS").splitlines() if "=" in l)
+    log(f"wpa: STATUS p2p_device_address={st.get('p2p_device_address')} wpa_state={st.get('wpa_state')}")
+    log(f"wpa: P2P_FIND 30 -> {w.request('P2P_FIND 30')}")
+    target, connect_sent, group, seen = peer.lower(), False, None, set()
+    t_start = time.monotonic()
+    t_end = t_start + timeout
+
+    def connect(addr):
+        nonlocal connect_sent
+        connect_sent = True
+        r = w.request(f"P2P_CONNECT {addr} pbc go_intent=15")
+        log(f"wpa: P2P_CONNECT {addr} pbc go_intent=15 -> {r}")
+
+    while time.monotonic() < t_end:
+        ev = w.event(1.0)
+        if ev is None:
+            if not connect_sent and time.monotonic() - t_start > 10:
+                log("camera not seen in discovery after 10 s; connecting to its announced address anyway")
+                connect(target)
+            continue
+        if ev.startswith(NOISY):
+            continue
+        if ev.startswith("P2P-DEVICE-FOUND"):
+            addr = ev.split()[1].lower()
+            name = re.search(r"name='([^']*)'", ev)
+            if addr in seen:
                 continue
-            if ev.startswith(NOISY):
-                continue
-            if ev.startswith("P2P-DEVICE-FOUND"):
-                addr = ev.split()[1].lower()
-                name = re.search(r"name='([^']*)'", ev)
-                if addr in seen:
-                    continue
-                seen.add(addr)
-                log(f"wpa: {ev}")
-                if not connect_sent and (addr == target or (name and name.group(1).startswith("Gear 360"))):
-                    if addr != target:
-                        log(f"camera's Wi-Fi Direct device address is {addr}, not the announced {target}")
-                    connect(addr)
-                continue
+            seen.add(addr)
             log(f"wpa: {ev}")
-            if ev.startswith("P2P-GROUP-STARTED"):
-                group = ev.split()[1]
-                break
-            if ev.startswith(("P2P-GO-NEG-FAILURE", "P2P-GROUP-FORMATION-FAILURE")):
-                for addr in sorted(seen | {target}):
-                    info = w.request(f"P2P_PEER {addr}")
-                    log(f"wpa: P2P_PEER {addr}: " + " ".join(info.splitlines()[:12]))
-                break
-        else:
-            log(f"no group after {timeout:.0f} s")
-        w.request("P2P_STOP_FIND")
+            if not connect_sent and (addr == target or (name and name.group(1).startswith("Gear 360"))):
+                if addr != target:
+                    log(f"camera's Wi-Fi Direct device address is {addr}, not the announced {target}")
+                connect(addr)
+            continue
+        log(f"wpa: {ev}")
+        if ev.startswith("P2P-GROUP-STARTED"):
+            group = ev.split()[1]
+            break
+        if ev.startswith(("P2P-GO-NEG-FAILURE", "P2P-GROUP-FORMATION-FAILURE")):
+            break
+    else:
+        log(f"no group after {timeout:.0f} s")
+    if not group:
+        info = w.request(f"P2P_PEER {target}")
+        log(f"wpa: P2P_PEER {target}: " + " ".join(info.splitlines()))
+    w.request("P2P_STOP_FIND")
     return group
 
 
