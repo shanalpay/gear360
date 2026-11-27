@@ -2,17 +2,19 @@
 """First fully native session: Bluetooth (SAP) + Wi-Fi Direct + UPnP, no phone.
 
   1. SAP session over Bluetooth (g360.sap), announcing this PC's Wi-Fi MAC as `wifi-mac-address` in `info`
-  2. cmd-req execute mobilelink -> the camera enables Wi-Fi Direct and waits for GO negotiation from the
-     announced address with the locally-administered bit set (any other peer gets "status 1")
-  3. Wi-Fi Direct with this PC as group owner, 192.168.49.1/24, DHCP for the camera (dnsmasq)
+  2. cmd-req execute mobilelink -> the camera enables Wi-Fi Direct
+  3. Wi-Fi Direct as Samsung's phone does it: provision discovery (PBC), then GO negotiation with this PC as
+     group owner (the camera first answers status 1, then sends its own request); 192.168.49.1/24 and DHCP
+     for the camera (dnsmasq)
   4. g360's UPnP code talks to the camera directly (live view switch + capabilities)
 The Bluetooth session stays open throughout: the camera drops Wi-Fi ~30 s after it ends.
 
 Wi-Fi Direct modes (--p2p):
-  own     (default, sudo) the Wi-Fi interface is taken from NetworkManager for the session and given the
-          locally-administered address; a private wpa_supplicant runs P2P on it (g360.p2p). Restored on exit.
-          Internet over Wi-Fi drops meanwhile (use Ethernet).
-  wpacli  (sudo) NetworkManager's wpa_supplicant and its P2P-device address (diagnostics)
+  wpacli  (default, sudo) NetworkManager's wpa_supplicant over its control socket
+  own     (sudo) the Wi-Fi interface is taken from NetworkManager for the session and given the Wi-Fi MAC
+          with the locally-administered bit set; a private wpa_supplicant runs P2P (g360.p2p). Restored on
+          exit; Wi-Fi internet drops meanwhile. (This wpa_supplicant build still creates a dedicated
+          P2P-device wdev, which takes a hardware address, so the P2P address is not the one set.)
   nm      NetworkManager profile `gear360-p2p` (no root):
             nmcli connection add type wifi-p2p con-name gear360-p2p wifi-p2p.peer <camera wifi-direct-mac> \
                 wifi-p2p.wps-method pbc ipv4.method shared ipv4.addresses 192.168.49.1/24 \
@@ -81,22 +83,35 @@ def _wpa_connect(w, peer: str, log, timeout: float) -> str | None:
     st = dict(l.split("=", 1) for l in w.request("STATUS").splitlines() if "=" in l)
     log(f"wpa: STATUS p2p_device_address={st.get('p2p_device_address')} wpa_state={st.get('wpa_state')}")
     log(f"wpa: P2P_FIND 30 -> {w.request('P2P_FIND 30')}")
-    target, connect_sent, group, seen = peer.lower(), False, None, set()
+    # As Samsung's phone does: provision discovery (PBC) first, then GO negotiation. The camera answers our
+    # GO Negotiation Request with status 1 and then, prompted by the provision discovery, sends its own
+    # request, which wpa_supplicant (waiting for the peer) accepts.
+    target, group, seen, cam = peer.lower(), None, set(), None
+    phase = "find"           # find -> pd -> connect
     t_start = time.monotonic()
     t_end = t_start + timeout
+    t_pd = 0.0
 
-    def connect(addr):
-        nonlocal connect_sent
-        connect_sent = True
-        r = w.request(f"P2P_CONNECT {addr} pbc go_intent=15")
-        log(f"wpa: P2P_CONNECT {addr} pbc go_intent=15 -> {r}")
+    def provision(addr):
+        nonlocal phase, cam, t_pd
+        cam, phase, t_pd = addr, "pd", time.monotonic()
+        log(f"wpa: P2P_PROV_DISC {addr} pbc -> {w.request(f'P2P_PROV_DISC {addr} pbc')}")
+
+    def connect():
+        nonlocal phase
+        phase = "connect"
+        r = w.request(f"P2P_CONNECT {cam} pbc go_intent=15")
+        log(f"wpa: P2P_CONNECT {cam} pbc go_intent=15 -> {r}")
 
     while time.monotonic() < t_end:
         ev = w.event(1.0)
         if ev is None:
-            if not connect_sent and time.monotonic() - t_start > 10:
-                log("camera not seen in discovery after 10 s; connecting to its announced address anyway")
-                connect(target)
+            if phase == "find" and time.monotonic() - t_start > 10:
+                log("camera not seen in discovery after 10 s; trying its announced address anyway")
+                provision(target)
+            elif phase == "pd" and time.monotonic() - t_pd > 5:
+                log("no provision discovery response in 5 s; starting GO negotiation anyway")
+                connect()
             continue
         if ev.startswith(NOISY):
             continue
@@ -106,17 +121,20 @@ def _wpa_connect(w, peer: str, log, timeout: float) -> str | None:
             if addr in seen:
                 continue
             seen.add(addr)
-            log(f"wpa: {ev}")
-            if not connect_sent and (addr == target or (name and name.group(1).startswith("Gear 360"))):
+            if addr == target or (name and name.group(1).startswith("Gear 360")):
+                log(f"wpa: {ev}")
                 if addr != target:
                     log(f"camera's Wi-Fi Direct device address is {addr}, not the announced {target}")
-                connect(addr)
+                if phase == "find":
+                    provision(addr)
             continue
         log(f"wpa: {ev}")
-        if ev.startswith("P2P-GROUP-STARTED"):
+        if phase == "pd" and ev.startswith(("P2P-PROV-DISC-PBC-RESP", "P2P-PROV-DISC-FAILURE")):
+            connect()
+        elif ev.startswith("P2P-GROUP-STARTED"):
             group = ev.split()[1]
             break
-        if ev.startswith(("P2P-GO-NEG-FAILURE", "P2P-GROUP-FORMATION-FAILURE")):
+        elif ev.startswith(("P2P-GO-NEG-FAILURE", "P2P-GROUP-FORMATION-FAILURE")):
             break
     else:
         log(f"no group after {timeout:.0f} s")
@@ -226,10 +244,10 @@ def session(a, log, host: str, cam: str, announce: str, wpa: dict) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--camera")
-    ap.add_argument("--p2p", choices=["own", "wpacli", "nm"], default="own",
-                    help="own (default, sudo): private wpa_supplicant whose Wi-Fi Direct address is the Wi-Fi MAC "
-                         "with the locally-administered bit set, as the camera expects; wpacli (sudo): "
-                         "NetworkManager's wpa_supplicant; nm: NetworkManager profile (no root)")
+    ap.add_argument("--p2p", choices=["own", "wpacli", "nm"], default="wpacli",
+                    help="wpacli (default, sudo): NetworkManager's wpa_supplicant over its control socket; "
+                         "own (sudo): private wpa_supplicant on the Wi-Fi interface (taken from NetworkManager "
+                         "for the session); nm: NetworkManager profile (no root, no provision discovery)")
     ap.add_argument("--iface", help="Wi-Fi interface for --p2p own (default: the first wl* interface)")
     ap.add_argument("--announce", help="override the wifi-mac-address announced to the camera")
     ap.add_argument("--profile", default="gear360-p2p")

@@ -226,6 +226,21 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   (wpa_supplicant `p2p_device_random_mac_addr`) or drive `wpa_cli -p /run/wpa_supplicant -i p2p-dev-<wlan>` to see
   the GO-negotiation result directly.
 
+- **Wi-Fi Direct from the PC (2026-11-27, root, wpa_supplicant control socket):** after `mobilelink` the
+  camera appears in P2P discovery at its announced `wifi-direct-mac` (config methods 0x80 = PBC). A bare
+  `P2P_CONNECT … pbc go_intent=15` gets **GO Negotiation Response status 1** and then nothing more; the
+  camera ignores the peer for ~60 s until it drops out of discovery. This happened whether we connected from
+  the P2P-device address (wlan MAC + 1) or from the wlan MAC itself.
+- **The S8+ also got status 1 first.** Its sequence (session-2 logcat): Provision Discovery Request (PBC) →
+  PD Response with `static_ip` → our GO Negotiation Request → **status 1** → **25 ms later the camera sends its
+  own GO Negotiation Request** → status 0 → phone is GO (freq 5805), camera client. The PC runs had skipped
+  provision discovery, so `native_session` now does PD first. The S8+ announced its Wi-Fi MAC
+  (`B0:72:BF:…`) and its P2P device address was that MAC with the locally-administered bit set (`B2:72:BF:…`);
+  whether the camera checks that relation is still open.
+- `wpa_supplicant` 2.10 (Pop!_OS) always creates a dedicated P2P-device wdev when the driver supports one
+  (no `p2p_device=` driver param); mac80211 gives it the first unused hardware address, so its address
+  cannot be chosen by changing the interface MAC.
+
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
   (any value works, e.g. `SEC_RVF_ML_00:11:22:33:44:55`). g360 sends `SEC_RVF_ML_<client_id>`.
