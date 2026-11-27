@@ -196,8 +196,12 @@ def session(a, log, host: str, cam: str, announce: str, wpa: dict) -> int:
             sess = sap.HostSession(cb.wait(15), cam, host, log=log, on_json=on_json)
 
             def pump():
-                while not stop.is_set() and sess.pump(0.5):
-                    pass
+                try:
+                    while not stop.is_set() and sess.pump(0.5):
+                        pass
+                except OSError:          # socket closed during shutdown
+                    if not stop.is_set():
+                        raise
             threading.Thread(target=pump, daemon=True).start()
 
             if not ready.wait(30):
