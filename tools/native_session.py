@@ -58,7 +58,7 @@ NOISY = ("CTRL-EVENT-SCAN-STARTED", "CTRL-EVENT-SCAN-RESULTS", "CTRL-EVENT-BSS-"
 
 
 def wpa_connect(peer: str, log, timeout: float = 60, iface: str | None = None, ctrl_dir: str | None = None,
-                debug_to_journal: bool = True) -> str | None:
+                debug_to_journal: bool = True, freq: int | None = None) -> str | None:
     """Root only: drive wpa_supplicant's P2P directly over its control socket (NetworkManager's instance by
     default, or our private one), log every event, and return the group interface name if a group starts.
     GO intent 7 as in app 1.4 (`groupOwnerIntent = 7`); the camera bids 1, so this PC becomes GO, as the phone did. The camera is matched by its announced
@@ -68,18 +68,18 @@ def wpa_connect(peer: str, log, timeout: float = 60, iface: str | None = None, c
         w.attach()
         log(f"wpa_supplicant control socket {w.iface}: attached")
         if not debug_to_journal:
-            return _wpa_connect(w, peer, log, timeout)
+            return _wpa_connect(w, peer, log, timeout, freq)
         prev = re.search(r"Current level: (\w+)", w.request("LOG_LEVEL"))
         prev = prev.group(1) if prev else "INFO"
         w.request("LOG_LEVEL DEBUG")     # NetworkManager's wpa_supplicant logs to syslog (-s): the journal
         log(f"wpa_supplicant debug logging on (was {prev}): journalctl -u wpa_supplicant shows GO negotiation")
         try:
-            return _wpa_connect(w, peer, log, timeout)
+            return _wpa_connect(w, peer, log, timeout, freq)
         finally:
             w.request(f"LOG_LEVEL {prev}")
 
 
-def _wpa_connect(w, peer: str, log, timeout: float) -> str | None:
+def _wpa_connect(w, peer: str, log, timeout: float, freq: int | None = None) -> str | None:
     st = dict(l.split("=", 1) for l in w.request("STATUS").splitlines() if "=" in l)
     log(f"wpa: STATUS p2p_device_address={st.get('p2p_device_address')} wpa_state={st.get('wpa_state')}")
     log(f"wpa: P2P_FIND 30 -> {w.request('P2P_FIND 30')}")
@@ -100,8 +100,8 @@ def _wpa_connect(w, peer: str, log, timeout: float) -> str | None:
     def connect():
         nonlocal phase
         phase = "connect"
-        r = w.request(f"P2P_CONNECT {cam} pbc go_intent=7")
-        log(f"wpa: P2P_CONNECT {cam} pbc go_intent=7 -> {r}")
+        cmd = f"P2P_CONNECT {cam} pbc go_intent=7" + (f" freq={freq}" if freq else "")
+        log(f"wpa: {cmd} -> {w.request(cmd)}")
 
     while time.monotonic() < t_end:
         ev = w.event(1.0)
@@ -159,12 +159,12 @@ def serve_group(group: str, log):
     """Root only: give the GO interface 192.168.49.1/24 and run a DHCP server for the camera (as the phone did)."""
     subprocess.run(["ip", "addr", "add", "192.168.49.1/24", "dev", group], capture_output=True)
     subprocess.run(["ip", "link", "set", group, "up"], capture_output=True)
-    log(f"{group}: 192.168.49.1/24; starting dnsmasq DHCP (192.168.49.10-50)")
+    log(f"{group}: 192.168.49.1/24; starting dnsmasq DHCP (camera gets 192.168.49.10, as from the phone)")
     (ROOT / "tmp").mkdir(exist_ok=True)
     out = open(ROOT / "tmp" / "dnsmasq.log", "w")
     os.chmod(out.name, 0o644)
     return subprocess.Popen(["dnsmasq", "--no-daemon", "--port=0", f"--interface={group}", "--bind-interfaces",
-                             "--dhcp-range=192.168.49.10,192.168.49.50,255.255.255.0,1h", "--log-dhcp",
+                             "--dhcp-range=192.168.49.10,192.168.49.10,255.255.255.0,1h", "--log-dhcp",
                              "--dhcp-leasefile=" + str(ROOT / "tmp" / "dnsmasq.leases")],
                             stdout=out, stderr=subprocess.STDOUT)
 
@@ -253,6 +253,9 @@ def main() -> int:
                          "nm: NetworkManager profile (no root, no provision discovery)")
     ap.add_argument("--iface", help="Wi-Fi interface for --p2p own (default: the first wl* interface)")
     ap.add_argument("--announce", help="override the wifi-mac-address announced to the camera")
+    ap.add_argument("--freq", type=int, default=None,
+                    help="force the group's channel in MHz (default for --p2p own: 2412, the camera's channel; "
+                         "Intel cards cannot start a GO on most 5 GHz channels unless already connected there)")
     ap.add_argument("--profile", default="gear360-p2p")
     ap.add_argument("--hold", type=float, default=60, help="seconds to keep the session up after success")
     a = ap.parse_args()
@@ -274,9 +277,11 @@ def main() -> int:
             (ROOT / "tmp").mkdir(exist_ok=True)
             ws = stack.enter_context(p2pmod.OwnSupplicant(iface, log=log, logfile=str(ROOT / "tmp" / "wpa_own.log")))
             announce = a.announce or ws.perm
-            wpa = {"iface": ws.iface, "ctrl_dir": ws.ctrl_dir, "debug_to_journal": False}
+            wpa = {"iface": ws.iface, "ctrl_dir": ws.ctrl_dir, "debug_to_journal": False, "freq": a.freq or 2412}
         else:
             announce = a.announce or p2p_device_addr()
+            if a.p2p == "wpacli" and a.freq:
+                wpa = {"freq": a.freq}
         log(f"host {host}  camera {cam}  announcing wifi-mac-address {announce}")
         rc = session(a, log, host, cam, announce, wpa)
     log(f"done (exit {rc})")

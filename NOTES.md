@@ -256,6 +256,12 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   `op-mode: user`, and the same `ch-negotiation-wa` in its info ack; it connects with `groupOwnerIntent = 7`.
   g360 now sends the 1.4 form (byte-identical, tests/test_jsonmsg.py) and uses GO intent 7.
 
+- **App-1.4 `info` was the key (2026-11-27):** with the 1.4 form (5G-GO, op-mode) the camera answered our GO
+  Negotiation Request with status 1 and **18 ms later sent its own request** → `P2P-GO-NEG-SUCCESS role=GO
+  freq=5745` (PC = GO, camera client, PBC). The group then failed: `Failed to set channel (freq=5745): -22` —
+  the Intel card cannot start a GO on that 5 GHz channel without an existing connection there. native_session
+  now forces the group onto 2412 MHz (the camera's channel) in `own` mode (`--freq`).
+
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
   (any value works, e.g. `SEC_RVF_ML_00:11:22:33:44:55`). g360 sends `SEC_RVF_ML_<client_id>`.
