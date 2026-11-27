@@ -253,8 +253,13 @@ class HostSession:
 
 
 def standard_json_handler(p2p_mac: str, then: Callable[[HostSession], None] | None = None,
-                          device_name: str = "Linux"):
-    """Answers the camera's JSON the way Samsung's app does; calls `then(session)` once config is exchanged."""
+                          device_name: str = "Linux", settle: float = 1.0):
+    """Answers the camera's JSON the way Samsung's app does (session-2 capture of app 1.4.00.9):
+    info + widget-info-req -> (camera) date-time-req -> rsp; (camera) widget-info-req -> NOT answered by the
+    app; (camera) info -> ack; (camera) config-info -> ack; (camera) widget-info-rsp.
+    `then(session)` runs once the camera's widget-info-rsp has arrived (the app only sent commands after that)."""
+    done = {"config": False, "then": False}
+
     def handler(s: HostSession, m: jsonmsg.Message | None):
         if m is None:                                   # service just came up: introduce ourselves
             s.send_json(jsonmsg.phone_info(p2p_mac, device_name=device_name, app_version="1.0.22"))
@@ -262,15 +267,15 @@ def standard_json_handler(p2p_mac: str, then: Callable[[HostSession], None] | No
             return
         if m.msg_id == "date-time-req":
             s.send_json(jsonmsg.date_time_rsp())
-        elif m.msg_id == "widget-info-req":
-            # the camera also asks for widget info; leaving it unanswered drew a cmd-req "dismiss" ~15 s later
-            s.send_json(jsonmsg.envelope("widget-info-rsp", {"result": {"enum": "success", "description": "100"}}))
         elif m.msg_id == "info" and m.value("model-name"):
             s.send_json(jsonmsg.info_ack(app_version="1.0.22"))
         elif m.msg_id == "config-info":
             s.send_json(jsonmsg.config_info_ack())
-            if then:
-                then(s)
+            done["config"] = True
+        elif m.msg_id == "widget-info-rsp" and done["config"] and then and not done["then"]:
+            done["then"] = True
+            time.sleep(settle)
+            then(s)
     return handler
 
 

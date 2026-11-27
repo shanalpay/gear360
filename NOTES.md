@@ -210,8 +210,21 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   camera `date-time-req` (answered), camera `info` (full identity), `config-info` (acked). Camera also sends its own
   `widget-info-req` (unanswered → `cmd-req dismiss` ~15 s later; now answered) and a status string on channel 230:
   `<GSIM>@[ID]StandaloneRate@[RATE]14@</GSIM>`.
-- Next: `cmd-req execute mobilelink` → camera starts Wi-Fi Direct toward the P2P address we announced in `info`;
-  host must be ready as P2P group owner (wpa_supplicant) first.
+- **JSON sequencing that the camera needs** (from the app 1.4 log): the app does NOT answer the camera's
+  `widget-info-req`, and only sends commands after the camera's `widget-info-rsp` (which follows `config-info`).
+  Sending `mobilelink` right after the config ack got no answer; sending it ~1 s after `widget-info-rsp` →
+  **`cmd-rsp success, r-code 100` in 1.1 s** (`tools/native_session.py`, 2026-11-26).
+- PC Wi-Fi Direct: `iw dev` shows the P2P-device wdev at **wlan MAC + 1** (not the wlan MAC with the
+  locally-administered bit set). NetworkManager 1.36 can run P2P as the desktop user (StartFind works; profile
+  `gear360-p2p`: peer = camera wifi-direct-mac, wps pbc, ipv4 shared 192.168.49.1/24), but `nmcli connection up`
+  after mobilelink timed out ("802.1X supplicant took too long to authenticate"). NM/wpa_supplicant debug logging
+  and wpa_supplicant's D-Bus/ctrl socket (`-O /run/wpa_supplicant`) are root-only.
+- Hypothesis for the timeout: the camera expects the P2P peer at the *announced* address with the
+  locally-administered bit set — A10e announced B2:26:5A:… (real 82:7b:…) → rejected; S8+ announced its wlan MAC
+  B0:72:BF:xx:xx:xx and connected from B2:72:BF:xx:xx:xx → accepted; PC announced 58:…:f0 = real, bit clear →
+  camera would expect 5A:…:f0 → no connection. Test with root: give the P2P device a locally-administered address
+  (wpa_supplicant `p2p_device_random_mac_addr`) or drive `wpa_cli -p /run/wpa_supplicant -i p2p-dev-<wlan>` to see
+  the GO-negotiation result directly.
 
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
