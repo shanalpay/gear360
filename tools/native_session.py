@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 """First fully native session: Bluetooth (SAP) + Wi-Fi Direct + UPnP, no phone.
 
-  1. SAP session over Bluetooth (g360.sap), announcing this PC's real Wi-Fi Direct device address in `info`
-  2. cmd-req execute mobilelink -> the camera enables Wi-Fi Direct and expects a connection from that address
-  3. NetworkManager brings up the `gear360-p2p` Wi-Fi Direct profile (PBC, ipv4 shared 192.168.49.1/24)
+  1. SAP session over Bluetooth (g360.sap), announcing this PC's Wi-Fi MAC as `wifi-mac-address` in `info`
+  2. cmd-req execute mobilelink -> the camera enables Wi-Fi Direct and waits for GO negotiation from the
+     announced address with the locally-administered bit set (any other peer gets "status 1")
+  3. Wi-Fi Direct with this PC as group owner, 192.168.49.1/24, DHCP for the camera (dnsmasq)
   4. g360's UPnP code talks to the camera directly (live view switch + capabilities)
 The Bluetooth session stays open throughout: the camera drops Wi-Fi ~30 s after it ends.
 
-Setup (once):
-  nmcli connection add type wifi-p2p con-name gear360-p2p wifi-p2p.peer <camera wifi-direct-mac> \
-      wifi-p2p.wps-method pbc ipv4.method shared ipv4.addresses 192.168.49.1/24 ipv6.method disabled \
-      connection.autoconnect no
+Wi-Fi Direct modes (--p2p):
+  own     (default, sudo) the Wi-Fi interface is taken from NetworkManager for the session and given the
+          locally-administered address; a private wpa_supplicant runs P2P on it (g360.p2p). Restored on exit.
+          Internet over Wi-Fi drops meanwhile (use Ethernet).
+  wpacli  (sudo) NetworkManager's wpa_supplicant and its P2P-device address (diagnostics)
+  nm      NetworkManager profile `gear360-p2p` (no root):
+            nmcli connection add type wifi-p2p con-name gear360-p2p wifi-p2p.peer <camera wifi-direct-mac> \
+                wifi-p2p.wps-method pbc ipv4.method shared ipv4.addresses 192.168.49.1/24 \
+                ipv6.method disabled connection.autoconnect no
 Run from the project root:
-  G360_LIBWSM=/path/to/arm64/libwsm2.so python3 tools/native_session.py [--hold 60]
+  sudo G360_LIBWSM=/path/to/arm64/libwsm2.so python3 tools/native_session.py [--hold 60]
 """
 import argparse
+import contextlib
 import glob
 import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -30,6 +38,7 @@ for sp in glob.glob(str(ROOT / ".venv/lib/python3*/site-packages")):
     sys.path.append(sp)
 
 from g360 import bluez, jsonmsg, sap, wsm  # noqa: E402
+from g360 import p2p as p2pmod  # noqa: E402
 from g360.transport import DirectTransport  # noqa: E402
 from g360.upnp import Camera  # noqa: E402
 
@@ -46,14 +55,18 @@ def p2p_device_addr() -> str:
 NOISY = ("CTRL-EVENT-SCAN-STARTED", "CTRL-EVENT-SCAN-RESULTS", "CTRL-EVENT-BSS-", "CTRL-EVENT-REGDOM")
 
 
-def wpa_connect(peer: str, log, timeout: float = 60) -> str | None:
-    """Root only: drive wpa_supplicant's P2P directly over its control socket (NetworkManager's instance),
-    log every event, and return the group interface name if a group starts. We ask to be group owner
-    (go_intent=15), as Samsung's phone was. The camera is matched by its announced address or by name."""
+def wpa_connect(peer: str, log, timeout: float = 60, iface: str | None = None, ctrl_dir: str | None = None,
+                debug_to_journal: bool = True) -> str | None:
+    """Root only: drive wpa_supplicant's P2P directly over its control socket (NetworkManager's instance by
+    default, or our private one), log every event, and return the group interface name if a group starts.
+    We ask to be group owner (go_intent=15), as Samsung's phone was. The camera is matched by its announced
+    address or by name."""
     from g360.wpactrl import WpaCtrl
-    with WpaCtrl() as w:
+    with WpaCtrl(iface, ctrl_dir) as w:
         w.attach()
         log(f"wpa_supplicant control socket {w.iface}: attached")
+        if not debug_to_journal:
+            return _wpa_connect(w, peer, log, timeout)
         prev = re.search(r"Current level: (\w+)", w.request("LOG_LEVEL"))
         prev = prev.group(1) if prev else "INFO"
         w.request("LOG_LEVEL DEBUG")     # NetworkManager's wpa_supplicant logs to syslog (-s): the journal
@@ -114,10 +127,10 @@ def _wpa_connect(w, peer: str, log, timeout: float) -> str | None:
     return group
 
 
-def wpa_cleanup():
+def wpa_cleanup(iface: str | None = None, ctrl_dir: str | None = None):
     from g360.wpactrl import WpaCtrl
     try:
-        with WpaCtrl() as w:
+        with WpaCtrl(iface, ctrl_dir) as w:
             w.request("P2P_GROUP_REMOVE *")
             w.request("P2P_CANCEL")
     except (OSError, TimeoutError):
@@ -129,32 +142,21 @@ def serve_group(group: str, log):
     subprocess.run(["ip", "addr", "add", "192.168.49.1/24", "dev", group], capture_output=True)
     subprocess.run(["ip", "link", "set", group, "up"], capture_output=True)
     log(f"{group}: 192.168.49.1/24; starting dnsmasq DHCP (192.168.49.10-50)")
+    (ROOT / "tmp").mkdir(exist_ok=True)
+    out = open(ROOT / "tmp" / "dnsmasq.log", "w")
+    os.chmod(out.name, 0o644)
     return subprocess.Popen(["dnsmasq", "--no-daemon", "--port=0", f"--interface={group}", "--bind-interfaces",
-                             "--dhcp-range=192.168.49.10,192.168.49.50,255.255.255.0,1h", "--log-dhcp"],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                             "--dhcp-range=192.168.49.10,192.168.49.50,255.255.255.0,1h", "--log-dhcp",
+                             "--dhcp-leasefile=" + str(ROOT / "tmp" / "dnsmasq.leases")],
+                            stdout=out, stderr=subprocess.STDOUT)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--camera")
-    ap.add_argument("--p2p", choices=["nm", "wpacli"], default="nm",
-                    help="nm: NetworkManager profile (no root); wpacli: drive wpa_supplicant directly (run with sudo)")
-    ap.add_argument("--profile", default="gear360-p2p")
-    ap.add_argument("--hold", type=float, default=60, help="seconds to keep the session up after success")
-    a = ap.parse_args()
-    if not os.environ.get(wsm.ENV_VAR):
-        print(f"set {wsm.ENV_VAR} to Samsung's arm64 libwsm2.so")
-        return 1
-    t0 = time.monotonic()
-    log = lambda m: print(f"[{time.monotonic() - t0:6.2f}s] {m}", flush=True)
 
-    host, cam = bluez.addresses(a.camera)
-    p2p = p2p_device_addr()
-    log(f"host {host}  camera {cam}  our Wi-Fi Direct address {p2p}")
 
+def session(a, log, host: str, cam: str, announce: str, wpa: dict) -> int:
     ready = threading.Event()        # mobilelink accepted
     state = {"desc_url": None, "cam_p2p": None}
-    base = sap.standard_json_handler(p2p, then=lambda s: s.send_json(jsonmsg.cmd_req("execute", "mobilelink")))
+    base = sap.standard_json_handler(announce, then=lambda s: s.send_json(jsonmsg.cmd_req("execute", "mobilelink")))
 
     def on_json(s, m):
         base(s, m)
@@ -170,62 +172,94 @@ def main() -> int:
             state["desc_url"] = m.value("url") or m.flat()
             log(f"camera UPnP description: {state['desc_url']}")
 
-    stop = threading.Event()
-    with bluez.ConnectBack(cam, log=log) as cb:
-        sess = sap.HostSession(cb.wait(15), cam, host, log=log, on_json=on_json)
+    stop, dhcp = threading.Event(), None
+    try:
+        with bluez.ConnectBack(cam, log=log) as cb:
+            sess = sap.HostSession(cb.wait(15), cam, host, log=log, on_json=on_json)
 
-        def pump():
-            while not stop.is_set() and sess.pump(0.5):
-                pass
-        threading.Thread(target=pump, daemon=True).start()
+            def pump():
+                while not stop.is_set() and sess.pump(0.5):
+                    pass
+            threading.Thread(target=pump, daemon=True).start()
 
-        if not ready.wait(30):
-            log("mobilelink was not accepted; stopping")
-            stop.set()
-            return 2
-        dhcp = None
-        if a.p2p == "wpacli":
-            if os.geteuid() != 0:
-                log("--p2p wpacli needs root (sudo)")
-                stop.set()
-                return 4
-            group = wpa_connect(state["cam_p2p"], log)
-            if not group:
-                log("no Wi-Fi Direct group formed (see the wpa: lines above)")
-                stop.set()
-                wpa_cleanup()
-                return 3
-            log(f"*** Wi-Fi Direct group up on {group} ***")
-            dhcp = serve_group(group, log)
-        else:
-            log(f"bringing up Wi-Fi Direct: nmcli connection up {a.profile} (camera P2P {state['cam_p2p']})")
-            r = subprocess.run(["nmcli", "--wait", "60", "connection", "up", a.profile], capture_output=True, text=True)
-            log(f"nmcli: {(r.stdout or r.stderr).strip()}")
-            if r.returncode != 0:
-                stop.set()
-                return 3
-        ipinfo = subprocess.run(["ip", "-4", "-br", "addr"], capture_output=True, text=True).stdout
-        log("interfaces: " + "; ".join(l for l in ipinfo.splitlines() if "192.168.49." in l or "p2p" in l))
+            if not ready.wait(30):
+                log("mobilelink was not accepted; stopping")
+                return 2
+            if a.p2p in ("own", "wpacli"):
+                group = wpa_connect(state["cam_p2p"], log, **wpa)
+                if not group:
+                    log("no Wi-Fi Direct group formed (see the wpa: lines above)")
+                    return 3
+                log(f"*** Wi-Fi Direct group up on {group} ***")
+                dhcp = serve_group(group, log)
+            else:
+                log(f"bringing up Wi-Fi Direct: nmcli connection up {a.profile} (camera P2P {state['cam_p2p']})")
+                r = subprocess.run(["nmcli", "--wait", "60", "connection", "up", a.profile],
+                                   capture_output=True, text=True)
+                log(f"nmcli: {(r.stdout or r.stderr).strip()}")
+                if r.returncode != 0:
+                    return 3
+            ipinfo = subprocess.run(["ip", "-4", "-br", "addr"], capture_output=True, text=True).stdout
+            log("interfaces: " + "; ".join(l for l in ipinfo.splitlines() if "192.168.49." in l or "p2p" in l))
 
-        camera = Camera(DirectTransport())
-        if not camera.wait_ready(45, log=log):
-            log("camera not reachable over Wi-Fi")
-        else:
+            camera = Camera(DirectTransport())
+            if not camera.wait_ready(45, log=log):
+                log("camera not reachable over Wi-Fi")
+                return 5
             log("camera reachable over Wi-Fi Direct - switching to live view")
             caps = camera.enter_live_view()
             log(f"*** NATIVE CONTROL WORKS: {caps.raw.get('StreamingInfo', {}).get('Default')} stream at "
                 f"{caps.stream_urls.get('high')}; {caps.raw.get('AVAILSHOTS')} shots left ***")
             log(f"holding the session for {a.hold:.0f} s (try: python3 -m g360 --direct live --play)")
             time.sleep(a.hold)
+            return 0
+    finally:
         stop.set()
         if dhcp:
             dhcp.terminate()
-    if a.p2p == "nm":
-        subprocess.run(["nmcli", "connection", "down", a.profile], capture_output=True)
-    else:
-        wpa_cleanup()
-    log("done")
-    return 0
+        if a.p2p == "nm":
+            subprocess.run(["nmcli", "connection", "down", a.profile], capture_output=True)
+        else:
+            wpa_cleanup(wpa.get("iface"), wpa.get("ctrl_dir"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--camera")
+    ap.add_argument("--p2p", choices=["own", "wpacli", "nm"], default="own",
+                    help="own (default, sudo): private wpa_supplicant whose Wi-Fi Direct address is the Wi-Fi MAC "
+                         "with the locally-administered bit set, as the camera expects; wpacli (sudo): "
+                         "NetworkManager's wpa_supplicant; nm: NetworkManager profile (no root)")
+    ap.add_argument("--iface", help="Wi-Fi interface for --p2p own (default: the first wl* interface)")
+    ap.add_argument("--announce", help="override the wifi-mac-address announced to the camera")
+    ap.add_argument("--profile", default="gear360-p2p")
+    ap.add_argument("--hold", type=float, default=60, help="seconds to keep the session up after success")
+    a = ap.parse_args()
+    if not os.environ.get(wsm.ENV_VAR):
+        print(f"set {wsm.ENV_VAR} to Samsung's arm64 libwsm2.so")
+        return 1
+    if a.p2p != "nm" and os.geteuid() != 0:
+        print(f"--p2p {a.p2p} needs root (sudo)")
+        return 4
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))    # so cleanup runs on kill too
+    t0 = time.monotonic()
+    log = lambda m: print(f"[{time.monotonic() - t0:6.2f}s] {m}", flush=True)
+
+    host, cam = bluez.addresses(a.camera)
+    with contextlib.ExitStack() as stack:
+        wpa = {}
+        if a.p2p == "own":
+            iface = a.iface or os.path.basename(sorted(glob.glob("/sys/class/net/wl*"))[0])
+            (ROOT / "tmp").mkdir(exist_ok=True)
+            ws = stack.enter_context(p2pmod.OwnSupplicant(iface, log=log, logfile=str(ROOT / "tmp" / "wpa_own.log")))
+            announce = a.announce or ws.perm
+            wpa = {"iface": ws.iface, "ctrl_dir": ws.ctrl_dir, "debug_to_journal": False}
+        else:
+            announce = a.announce or p2p_device_addr()
+        log(f"host {host}  camera {cam}  announcing wifi-mac-address {announce}")
+        rc = session(a, log, host, cam, announce, wpa)
+    log(f"done (exit {rc})")
+    return rc
 
 
 if __name__ == "__main__":

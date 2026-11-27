@@ -17,19 +17,19 @@ CTRL_DIR = "/run/wpa_supplicant"
 _counter = itertools.count()
 
 
-def p2p_iface() -> str:
-    for p in sorted(glob.glob(os.path.join(CTRL_DIR, "p2p-dev-*"))):
+def p2p_iface(ctrl_dir: str | None = None) -> str:
+    for p in sorted(glob.glob(os.path.join(ctrl_dir or CTRL_DIR, "p2p-dev-*"))):
         return os.path.basename(p)
     wl = sorted(glob.glob("/sys/class/net/wl*"))
     return "p2p-dev-" + os.path.basename(wl[0]) if wl else "p2p-dev-wlan0"
 
 
 class _Sock:
-    def __init__(self, iface: str):
+    def __init__(self, path: str):
         self.local = f"/tmp/g360_wpa_{os.getpid()}_{next(_counter)}"
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.s.bind(self.local)
-        self.s.connect(os.path.join(CTRL_DIR, iface))
+        self.s.connect(path)
 
     def recv(self, timeout: float) -> str | None:
         if not select.select([self.s], [], [], timeout)[0]:
@@ -45,9 +45,11 @@ class _Sock:
 
 
 class WpaCtrl:
-    def __init__(self, iface: str | None = None):
-        self.iface = iface or p2p_iface()
-        self._cmd = _Sock(self.iface)
+    def __init__(self, iface: str | None = None, ctrl_dir: str | None = None):
+        ctrl_dir = ctrl_dir or CTRL_DIR
+        self.iface = iface or p2p_iface(ctrl_dir)
+        self.path = os.path.join(ctrl_dir, self.iface)
+        self._cmd = _Sock(self.path)
         self._mon = None
 
     def request(self, command: str, timeout: float = 10) -> str:
@@ -60,7 +62,7 @@ class WpaCtrl:
                 return r.rstrip("\n")
 
     def attach(self):
-        self._mon = _Sock(self.iface)
+        self._mon = _Sock(self.path)
         self._mon.s.send(b"ATTACH")
         if (self._mon.recv(5) or "").strip() != "OK":
             raise RuntimeError("ATTACH failed")
