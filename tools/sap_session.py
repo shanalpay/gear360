@@ -4,7 +4,7 @@ Gear 360 service connection and the opening JSON exchange (info / date-time / co
 command at the end (e.g. --command mobilelink, which makes the camera start Wi-Fi Direct).
 
 Run from the project root with the system python3 (BlueZ via dbus-python) plus .venv for unicorn:
-    G360_LIBWSM=/path/to/arm64/libwsm2.so python3 tools/sap_session.py [--seconds 40] [--command mobilelink]
+    python3 tools/sap_session.py [--seconds 40] [--command mobilelink]
 """
 import argparse
 import glob
@@ -38,8 +38,8 @@ def main() -> int:
     ap.add_argument("--command", help="cmd-req to execute after the opening exchange, e.g. mobilelink")
     ap.add_argument("--p2p-mac", default=None)
     a = ap.parse_args()
-    if not os.environ.get(wsm.ENV_VAR):
-        print(f"set {wsm.ENV_VAR} to Samsung's arm64 libwsm2.so")
+    if not wsm.find_lib():
+        print(wsm.NOT_FOUND)
         return 1
     t0 = time.monotonic()
     log = lambda m: print(f"[{time.monotonic() - t0:6.2f}s] {m}", flush=True)

@@ -2,8 +2,9 @@
 
 The Samsung Accessory Protocol authenticates both ends with WSM, a white-box-crypto challenge/response keyed
 on the two Bluetooth addresses. Rather than re-implement it, we execute Samsung's library (`g360.elfemu`).
-The library is NOT shipped with this project: point G360_LIBWSM (or `lib_path`) at libwsm2.so for arm64,
-found inside Samsung's "SAccessoryService" APK under lib/arm64-v8a/.
+The library is NOT shipped with this project. It is found inside Samsung's "SAccessoryService" APK under
+lib/arm64-v8a/; find_lib() looks for it in G360_LIBWSM, then under the project's re/ and apk/ folders (where
+an extracted APK lands), then at ~/.config/g360/libwsm2.so.
 
 Roles (from com/sec/android/WSM and SASecurityManager): a Server and a Client, each initialised with
 (serverID, clientID) = Bluetooth addresses. Fresh authentication:
@@ -16,9 +17,10 @@ C signatures recovered from libwsm2_jni.so's JNI wrappers (see NOTES.md).
 """
 from __future__ import annotations
 
+import glob
 import os
-
-from .elfemu import ElfEmu
+import pathlib
+import pwd
 
 ENV_VAR = "G360_LIBWSM"
 BUF = 512          # every WSM message fits
@@ -34,10 +36,40 @@ class WSMError(RuntimeError):
     pass
 
 
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def find_lib() -> str | None:
+    """Path of Samsung's arm64 libwsm2.so: $G360_LIBWSM, the project's re/ or apk/ folders, or
+    ~/.config/g360/libwsm2.so (the invoking user's, also under sudo)."""
+    env = os.environ.get(ENV_VAR)
+    if env:
+        return env if os.path.exists(env) else None
+    for pattern in ("re/**/arm64-v8a/libwsm2.so", "apk/**/arm64-v8a/libwsm2.so"):
+        hits = sorted(glob.glob(str(ROOT / pattern), recursive=True))
+        if hits:
+            return hits[0]
+    homes = [pathlib.Path.home()]
+    if os.environ.get("SUDO_USER"):
+        try:
+            homes.insert(0, pathlib.Path(pwd.getpwnam(os.environ["SUDO_USER"]).pw_dir))
+        except KeyError:
+            pass
+    for home in homes:
+        p = home / ".config" / "g360" / "libwsm2.so"
+        if p.exists():
+            return str(p)
+    return None
+
+
+NOT_FOUND = (f"Samsung's arm64 libwsm2.so was not found: put it under the project's re/ or apk/ folder "
+             f"(as extracted from the SAccessoryService APK), at ~/.config/g360/libwsm2.so, or set {ENV_VAR}")
+
+
 def _lib_path(lib_path: str | None) -> str:
-    p = lib_path or os.environ.get(ENV_VAR)
+    p = lib_path or find_lib()
     if not p or not os.path.exists(p):
-        raise WSMError(f"libwsm2.so (arm64) not found; set {ENV_VAR} to its path")
+        raise WSMError(NOT_FOUND)
     return p
 
 
@@ -46,6 +78,7 @@ class _Party:
 
     def __init__(self, server_id: str, client_id: str, key: bytes | None = None, lib_path: str | None = None,
                  trace: bool = False, version: int | None = None):
+        from .elfemu import ElfEmu      # needs unicorn/pyelftools (.venv); finding the library does not
         self.emu = ElfEmu(_lib_path(lib_path), trace_log=trace)
         if version is not None:   # the SM-C200 (fw 0.83) speaks WSM protocol version 1
             self.emu.call("WSM_set_protocol_version", version)

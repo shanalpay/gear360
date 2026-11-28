@@ -157,8 +157,7 @@ StartupWMClass={WM_CLASS}
 MimeType=image/jpeg;video/mp4;
 Categories=Graphics;Viewer;
 """)
-    wsm = os.environ.get("G360_LIBWSM", "")
-    live = f"cd {ROOT} && G360_LIBWSM={wsm} sudo -E {py} tools/native_session.py --view; echo; printf 'Press Enter to close '; read x"
+    live = f"cd {ROOT} && sudo {py} tools/native_session.py --view; echo; printf 'Press Enter to close '; read x"
     (apps / "g360-live.desktop").write_text(f"""[Desktop Entry]
 Type=Application
 Name=Gear 360 Live
@@ -172,6 +171,7 @@ Categories=AudioVideo;Video;
     subprocess.run(["update-desktop-database", str(apps)], capture_output=True)
     subprocess.run(["gtk-update-icon-cache", "-q", "-t", str(data / "icons" / "hicolor")], capture_output=True)
     log(f"installed icons and menu entries 'Gear 360 Viewer' and 'Gear 360 Live' under {data}")
-    if not wsm:
-        log("note: G360_LIBWSM was not set, so 'Gear 360 Live' cannot authenticate; rerun with it exported")
+    from .wsm import NOT_FOUND, find_lib
+    if not find_lib():
+        log(f"note: {NOT_FOUND}")
     return 0

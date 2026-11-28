@@ -28,7 +28,9 @@ Samsung's app; no Samsung code is included. Not affiliated with or endorsed by S
 - Linux, Python 3.10+, `ffmpeg`/`ffplay`
 - Native mode: BlueZ (with `dbus-python` and PyGObject), a Wi-Fi card that supports P2P GO (tested: Intel AX211),
   `dnsmasq`, `iw`, `ethtool`, NetworkManager, root for the session; `pip install unicorn pyelftools` and
-  Samsung's `libwsm2.so` (arm64) from the SAccessoryService APK, pointed to by `G360_LIBWSM` (not included here).
+  Samsung's `libwsm2.so` (arm64) from the SAccessoryService APK (not included here): put the extracted APK under
+  the project's `re/` or `apk/` folder, or the library at `~/.config/g360/libwsm2.so`; it is found automatically
+  (`G360_LIBWSM` overrides).
   The Wi-Fi interface is taken from NetworkManager during the session (Wi-Fi internet drops; Ethernet stays).
 - Phone relay mode instead: an Android phone (Android 9 or earlier; Android 10+ randomizes the Wi-Fi Direct
   address and the camera refuses it) with Samsung's Gear 360 app, connected over USB with debugging enabled
@@ -39,11 +41,10 @@ Samsung's app; no Samsung code is included. Not affiliated with or endorsed by S
 ```bash
 sh tools/build_wpa_supplicant.sh        # once, no root: builds tmp/wpa-build/wpa_supplicant
 python3 tools/pair.py                   # once: camera in pairing mode (hold Menu -> "Gear 360 Manager" -> Record)
-export G360_LIBWSM=/path/to/arm64-v8a/libwsm2.so
-sudo -E python3 tools/native_session.py --view            # 360° live view; the session ends when it closes
-sudo -E python3 tools/native_session.py --play            # raw dual-fisheye window
-sudo -E python3 tools/native_session.py --then "live --out clip.mp4 --seconds 30"
-sudo -E python3 tools/native_session.py --then "shoot"
+sudo python3 tools/native_session.py --view            # 360° live view; the session ends when it closes
+sudo python3 tools/native_session.py --play            # raw dual-fisheye window
+sudo python3 tools/native_session.py --then "live --out clip.mp4 --seconds 30"
+sudo python3 tools/native_session.py --then "shoot"
 ```
 `--then` runs any `g360` command below (as you, not root) while the Bluetooth and Wi-Fi Direct session stays up.
 
@@ -54,7 +55,7 @@ the wheel zooms; on a touchpad pinch/spread zooms, on a touchscreen one finger t
 `F` fullscreen, `S` screenshot, `Space` pause. Lens calibration: `[` `]` field of view, `Ctrl+arrows` and `,` `.`
 back-lens alignment, `K` shows the blend band, `Ctrl+S` saves to `~/.config/g360/lens.json`.
 
-`python3 -m g360 install-desktop` (with `G360_LIBWSM` exported) adds the g360 icon and two app-menu entries:
+`python3 -m g360 install-desktop` adds the g360 icon and two app-menu entries:
 **Gear 360 Viewer** (also under Open With for JPEG/MP4 files) and **Gear 360 Live** (opens a terminal for sudo).
 
 ## Usage (phone relay mode)

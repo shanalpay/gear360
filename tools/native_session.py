@@ -20,7 +20,7 @@ Wi-Fi Direct modes (--p2p):
                 wifi-p2p.wps-method pbc ipv4.method shared ipv4.addresses 192.168.49.1/24 \
                 ipv6.method disabled connection.autoconnect no
 Run from the project root:
-  sudo G360_LIBWSM=/path/to/arm64/libwsm2.so python3 tools/native_session.py [--hold 60]
+  sudo python3 tools/native_session.py [--hold 60]     (libwsm2.so: see g360.wsm.find_lib)
   ... tools/native_session.py --view                      # 360° live view (mouse turns the sphere); ends when closed
   ... tools/native_session.py --play                      # raw dual-fisheye live window
   ... tools/native_session.py --then "live --out a.mp4 --seconds 30"   # any g360 command, run as you (not root)
@@ -331,8 +331,8 @@ def main() -> int:
     ap.add_argument("--play", action="store_const", dest="then", const="live --play",
                     help='raw dual-fisheye live window: shorthand for --then "live --play"')
     a = ap.parse_args()
-    if not os.environ.get(wsm.ENV_VAR):
-        print(f"set {wsm.ENV_VAR} to Samsung's arm64 libwsm2.so")
+    if not wsm.find_lib():
+        print(wsm.NOT_FOUND)
         return 1
     if a.p2p != "nm" and os.geteuid() != 0:
         print(f"--p2p {a.p2p} needs root (sudo)")

@@ -1,6 +1,6 @@
 """Command line: python3 -m g360 [--via-adb SERIAL | --direct] [--ip IP] <command> ...
 
-Native: `sudo -E python3 tools/native_session.py --then "<command> ..."` brings up Bluetooth and Wi-Fi Direct
+Native: `sudo python3 tools/native_session.py --then "<command> ..."` brings up Bluetooth and Wi-Fi Direct
 and runs this with --direct. Phone relay: connect a phone running Samsung's Gear 360 app to the camera and pass
 --via-adb <serial>; the phone only relays HTTP, all control logic runs here.
 

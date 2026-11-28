@@ -8,7 +8,7 @@ Flow (from the session-1 capture), on the SAP connection the camera opens back t
 Frames: u16 big-endian length + body; auth bodies are [msgType][authType=0][WSM packet].
 
 Run with the system python3 (dbus-python/PyGObject) from the project root; unicorn/pyelftools come from .venv:
-    G360_LIBWSM=/path/to/arm64/libwsm2.so python3 tools/sap_auth.py [--seconds 40]
+    python3 tools/sap_auth.py [--seconds 40]
 Camera: paired with this PC, switched on, not held by a phone.
 """
 import argparse
@@ -134,8 +134,8 @@ def main() -> int:
     a = ap.parse_args()
     t0 = time.monotonic()
     log = lambda m: print(f"[{time.monotonic() - t0:6.2f}s] {m}", flush=True)
-    if not os.environ.get(wsm.ENV_VAR):
-        print(f"set {wsm.ENV_VAR} to Samsung's arm64 libwsm2.so")
+    if not wsm.find_lib():
+        print(wsm.NOT_FOUND)
         return 1
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
