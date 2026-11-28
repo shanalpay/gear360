@@ -12,12 +12,14 @@ Touchpad: pinch / spread zooms (moving the fingers also turns). Touchscreen: one
 On-screen controls (bottom bar; H or its Hide button hides it): Snapshot saves a stitched 360° photo
 (equirectangular JPEG with 360 metadata), Record / Stop save the live stream (MP4, no re-encode), Play/Pause
 freezes the view, Library opens the saved files, Reset view. Files go to ~/Pictures/Gear 360.
+Webcam (W) publishes the picture as two virtual cameras for OBS (g360/webcam.py): the current view, and the
+full 360° equirectangular picture.
 Keys:
   V                  view: perspective -> little planet -> panorama (equirectangular) -> raw dual fisheye
   L                  keep the horizon level (yaw/pitch only) instead of free rotation
   R                  reset the view          F / F11   fullscreen          Space   pause
   S                  save a screenshot of the window to ~/Pictures
-  H                  hide / show the on-screen controls
+  H                  hide / show the on-screen controls       W   virtual webcams on / off
   Q / Esc            quit
 Lens calibration (saved with Ctrl+S to ~/.config/g360/lens.json):
   [ ]                lens field of view -/+ 0.5°
@@ -162,7 +164,8 @@ class FrameSource:
         self.frame: bytearray | None = None
         self.seq, self.ended, self.bytes_in = 0, False, 0
         self.live, self.projection = False, 0       # projection: 0 dual fisheye, 1 equirectangular
-        self.tee = None                             # called with every chunk of the input (recording)
+        self.tees: list = []                        # called with every chunk of the input (record, webcam)
+        self.path: str | None = None                # file sources
         self._lock = threading.Lock()
         if feed:
             threading.Thread(target=self._feed, args=(feed,), daemon=True).start()
@@ -207,13 +210,17 @@ class FrameSource:
 _DECODE_OUT = ["-vsync", "0", "-flush_packets", "1", "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1"]
 
 
+def live_decode_cmd() -> list[str]:
+    """ffmpeg decoding the camera's HEVC from stdin to yuv420p frames on stdout, with as little delay as possible."""
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
+            "-probesize", "32", "-analyzeduration", "0", "-f", "hevc", "-framerate", "30000/1001", "-i", "pipe:0",
+            *_DECODE_OUT]
+
+
 def live_source(src: IO[bytes], log=None) -> FrameSource:
     """The camera's TTTS live stream (from Camera.open_stream), decoded with as little delay as possible."""
     info = ttts.read_header(src)
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
-           "-probesize", "32", "-analyzeduration", "0", "-f", "hevc", "-framerate", "30000/1001", "-i", "pipe:0",
-           *_DECODE_OUT]
-    fs = FrameSource(cmd, info.width, info.height, feed=lambda dst: ttts.copy_video(src, dst, info, log))
+    fs = FrameSource(live_decode_cmd(), info.width, info.height, feed=lambda dst: ttts.copy_video(src, dst, info, log))
     fs.live = True
     return fs
 
@@ -226,8 +233,7 @@ class _Counting:
 
     def write(self, b):
         self.owner.bytes_in += len(b)
-        tee = self.owner.tee
-        if tee:
+        for tee in self.owner.tees:
             tee(b)
         return self.dst.write(b)
 
@@ -271,6 +277,7 @@ def file_source(path: str, max_size: int = 16384) -> FrameSource:
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", *pre, "-i", str(p),
                *vf, "-s", f"{w}x{h}", "-an", *_DECODE_OUT]
     fs = FrameSource(cmd, w, h, still=still)
+    fs.path = str(pathlib.Path(path).resolve())
     fs.projection = 1 if still and is_equirect(p) else 0
     return fs
 
@@ -448,7 +455,7 @@ def _insert_app1(jpeg: bytes, seg: bytes) -> bytes:
 
 class Recorder:
     """Saves the live HEVC stream to an MP4 (stream copy, no re-encode), starting at the next keyframe
-    (the camera sends one every 15 frames). Fed from the decoder's feeder thread through FrameSource.tee."""
+    (the camera sends one every 15 frames). Fed from the decoder's feeder thread through FrameSource.tees."""
 
     def __init__(self, path: pathlib.Path):
         self.path = path
@@ -495,6 +502,71 @@ class Recorder:
         threading.Thread(target=wait, daemon=True).start()
 
 
+class Stitcher:
+    """The stitching renderer on one moderngl context: the picture's YUV planes as mipmapped textures and the
+    shader that maps them onto the sphere. Used by the viewer's window and by the headless webcam process."""
+
+    def __init__(self, ctx, mgl):
+        self.ctx, self.mgl = ctx, mgl
+        self.prog = ctx.program(vertex_shader=VERT, fragment_shader=FRAG)
+        quad = ctx.buffer(data=array.array("f", [-1, -1, 1, -1, -1, 1, 1, 1]).tobytes())
+        self.vao = ctx.vertex_array(self.prog, [(quad, "2f", "pos")])
+        self.tex = None
+
+    def _textures(self, w: int, h: int):
+        if self.tex and self.tex[0].size == (w, h):
+            return
+        mk = lambda tw, th: self.ctx.texture((tw, th), 1, dtype="f1", alignment=1)
+        self.tex = (mk(w, h), mk(w // 2, h // 2), mk(w // 2, h // 2))
+        for i, (t, name) in enumerate(zip(self.tex, ("ty", "tu", "tv"))):
+            # Mipmaps + anisotropic filtering: wherever the view shows the picture smaller than its pixels (raw
+            # view, little planet, panorama, the squeezed lens edges) plain bilinear sampling skips pixels and
+            # aliases (jagged, shimmering detail).
+            t.build_mipmaps()
+            t.filter = (self.mgl.LINEAR_MIPMAP_LINEAR, self.mgl.LINEAR)
+            t.anisotropy = 16.0
+            t.repeat_x = t.repeat_y = False
+            self.prog[name].value = i
+
+    def upload(self, frame, w: int, h: int):
+        """A yuv420p frame."""
+        self._textures(w, h)
+        ys, cs = w * h, (w // 2) * (h // 2)
+        mv = memoryview(frame)
+        self.tex[0].write(mv[:ys])
+        self.tex[1].write(mv[ys:ys + cs])
+        self.tex[2].write(mv[ys + cs:ys + 2 * cs])
+        for t in self.tex:
+            t.build_mipmaps()
+
+    def draw(self, size, mode: int, rot, fov_deg: float, lens: dict, seams: bool = False, proj: int = 0):
+        """Draw into the bound framebuffer, `size` pixels."""
+        fw, fh = size
+        self.ctx.viewport = (0, 0, fw, fh)
+        self.ctx.clear(0.0, 0.0, 0.0)
+        if not self.tex:
+            return
+        w, h = self.tex[0].size
+        y, p, r = (math.radians(v) for v in lens["back_ypr"])
+        u = self.prog
+        u["tex_size"].value = (float(w), float(h))
+        u["win"].value = (float(fw), float(fh))
+        u["rot"].value = _gl_mat(rot)
+        u["fov"].value = math.radians(fov_deg)
+        u["mode"].value = mode
+        u["proj"].value = proj
+        u["half_fov"].value = math.radians(lens["fov"]) / 2
+        u["radius"].value = lens["radius"]
+        u["c_front"].value = tuple(lens["front_center"])
+        u["c_back"].value = tuple(lens["back_center"])
+        u["back_rot"].value = _gl_mat(_mul(_mul(_ry(y), _rx(p)), _rz(r)))
+        u["seams"].value = int(seams)
+        u["blend"].value = math.radians(lens.get("blend", DEFAULT_LENS["blend"]))
+        for i, t in enumerate(self.tex):
+            t.use(i)
+        self.vao.render(self.mgl.TRIANGLE_STRIP)
+
+
 def save_lens(lens: dict):
     CONFIG.parent.mkdir(parents=True, exist_ok=True)
     CONFIG.write_text(json.dumps(lens, indent=2) + "\n")
@@ -510,7 +582,7 @@ def load_lens() -> dict:
 
 
 class Viewer:
-    def __init__(self, title: str = "Gear 360", log=print):
+    def __init__(self, title: str = "Gear 360", log=print, webcam: bool = False):
         self.glfw, self.mgl = _gl_modules()
         self.log, self.title = log, title
         glfw = self.glfw
@@ -541,10 +613,8 @@ class Viewer:
         glfw.swap_interval(1)
         self.ctx = self.mgl.create_context()
         self.max_texture = self.ctx.info["GL_MAX_TEXTURE_SIZE"]
-        self.prog = self.ctx.program(vertex_shader=VERT, fragment_shader=FRAG)
+        self.st = Stitcher(self.ctx, self.mgl)
         quad = self.ctx.buffer(data=array.array("f", [-1, -1, 1, -1, -1, 1, 1, 1]).tobytes())
-        self.vao = self.ctx.vertex_array(self.prog, [(quad, "2f", "pos")])
-        self.tex = None
         self.lens = load_lens()
         self.samples, self.sample_t, self.calib = [], 0.0, None      # luma frames for A, the running fit
         self.mode, self.level, self.paused, self.seams = 0, False, False, False
@@ -557,6 +627,9 @@ class Viewer:
         self.src: FrameSource | None = None
         self.recorder: Recorder | None = None
         self.messages: list[str] = []     # from background threads, shown by the main loop
+        self.webcam = None                # webcam.Link while publishing
+        self.webcam_sinks = None          # tests: replace the v4l2 devices
+        self.webcam_at_start = webcam
         self.overlay = None
         try:
             from .overlay import Overlay
@@ -737,6 +810,8 @@ class Viewer:
             self._screenshot()
         elif key == g.KEY_K:
             self.seams = not self.seams
+        elif key == g.KEY_W and action == g.PRESS:
+            self._webcam_toggle()
         elif key == g.KEY_H and self.overlay:
             self.overlay.visible = not self.overlay.visible
         elif key == g.KEY_A and action == g.PRESS:
@@ -781,6 +856,8 @@ class Viewer:
             self._record_start()
         elif name == "stop":
             self._record_stop()
+        elif name == "webcam":
+            self._webcam_toggle()
         elif name == "play":
             self.paused = not self.paused
         elif name == "library":
@@ -794,7 +871,7 @@ class Viewer:
     def _snapshot(self):
         """Save the current picture as a stitched equirectangular 360° JPEG, centred where the view looks."""
         src = self.src
-        if not src or not self.tex:
+        if not src or not self.st.tex:
             return
         w = min(src.width, self.max_texture) // 2 * 2
         h = w // 2
@@ -826,18 +903,52 @@ class Viewer:
         out = library_dir() / time.strftime("360-%Y%m%d-%H%M%S.mp4")
         out.parent.mkdir(parents=True, exist_ok=True)
         self.recorder = Recorder(out)
-        src.tee = self.recorder.write
+        src.tees.append(self.recorder.write)
         self._say("Recording")
 
     def _record_stop(self):
         rec, self.recorder = self.recorder, None
         if not rec:
             return
-        if self.src:
-            self.src.tee = None
+        if self.src and rec.write in self.src.tees:
+            self.src.tees.remove(rec.write)
         secs = rec.seconds()
         rec.stop(lambda ok: self.messages.append(
             f"Saved {rec.path.name} ({int(secs) // 60}:{int(secs) % 60:02d})" if ok else "recording failed"))
+
+    # ---- virtual webcams ----
+    def _webcam_toggle(self):
+        if self.webcam:
+            self._webcam_close()
+            self._say("Webcam off")
+            return
+        from . import webcam
+        if not self.src or (not self.src.live and not self.src.path):
+            return
+        if not self.webcam_sinks and not any(webcam.find_device(label, dev)
+                                             for label, dev, _ in webcam.OUTPUTS.values()):
+            self._say("No virtual webcam devices: run  sudo sh tools/setup_webcam.sh")
+            return
+        self.webcam = webcam.Link(self.src, self.log, self.webcam_sinks)
+        self._webcam_state()
+        self._say("Webcam on (OBS: Video Capture Device: Gear 360 / Gear 360 equirect)")
+
+    def _webcam_close(self):
+        link, self.webcam = self.webcam, None
+        if link:
+            link.close()
+
+    def _webcam_state(self):
+        """Send the current view to the webcam process (only when it changed)."""
+        if not self.webcam:
+            return
+        if not self.webcam.alive():
+            self._webcam_close()
+            self._say("Webcam stopped (see the terminal)")
+            return
+        self.webcam.send({"mode": self.mode, "rot": [[round(v, 6) for v in r] for r in self.rot],
+                          "fov": round(self.fov.get(self.mode, 90.0), 3), "lens": self.lens,
+                          "proj": self.src.projection if self.src else 0})
 
     def _library(self):
         """Choose a saved file (a file dialog in the library folder); it opens in its own viewer window, so
@@ -869,7 +980,7 @@ class Viewer:
         scale = max(self.glfw.get_window_content_scale(self.win)[0], fh / max(self.glfw.get_window_size(self.win)[1], 1))
         img = ov.frame(fw, fh, scale, {"recording": self.recorder.seconds() if self.recorder else None,
                                        "paused": self.paused, "can_record": bool(src and src.live),
-                                       "can_stop": self.recorder is not None})
+                                       "can_stop": self.recorder is not None, "webcam": bool(self.webcam)})
         if img is not None:
             if not self.ov_tex or self.ov_tex.size != (fw, fh):
                 if self.ov_tex:
@@ -952,63 +1063,17 @@ class Viewer:
         self.log(f"viewer: calibration saved to {CONFIG} (Ctrl+R returns to the default)")
 
     # ---- frames and drawing ----
-    def _textures(self, w: int, h: int):
-        if self.tex and self.tex[0].size == (w, h):
-            return
-        mk = lambda tw, th: self.ctx.texture((tw, th), 1, dtype="f1", alignment=1)
-        self.tex = (mk(w, h), mk(w // 2, h // 2), mk(w // 2, h // 2))
-        for i, (t, name) in enumerate(zip(self.tex, ("ty", "tu", "tv"))):
-            # Mipmaps + anisotropic filtering: wherever the view shows the picture smaller than its pixels (raw
-            # view, little planet, panorama, the squeezed lens edges) plain bilinear sampling skips pixels and
-            # aliases (jagged, shimmering detail).
-            t.build_mipmaps()
-            t.filter = (self.mgl.LINEAR_MIPMAP_LINEAR, self.mgl.LINEAR)
-            t.anisotropy = 16.0
-            t.repeat_x = t.repeat_y = False
-            t.use(i)
-            self.prog[name].value = i
-
     def _upload(self, frame, w: int, h: int):
-        self._textures(w, h)
-        ys, cs = w * h, (w // 2) * (h // 2)
-        mv = memoryview(frame)
-        self.tex[0].write(mv[:ys])
-        self.tex[1].write(mv[ys:ys + cs])
-        self.tex[2].write(mv[ys + cs:ys + 2 * cs])
-        for t in self.tex:
-            t.build_mipmaps()
+        self.st.upload(frame, w, h)
 
     def _draw(self, w: int, h: int, size=None, mode=None, rot=None, seams=None):
         """Draw the picture into the window, or (size, mode, rot) into the bound framebuffer (Snapshot)."""
-        fw, fh = size or self.glfw.get_framebuffer_size(self.win)
         mode = self.mode if mode is None else mode
-        self.ctx.viewport = (0, 0, fw, fh)
-        self.ctx.clear(0.0, 0.0, 0.0)
-        if not self.tex:
-            if size is None:
-                self._draw_overlay(fw, fh)
-            return
-        lens = self.lens
-        y, p, r = (math.radians(v) for v in lens["back_ypr"])
-        u = self.prog
-        u["tex_size"].value = (float(w), float(h))
-        u["win"].value = (float(fw), float(fh))
-        u["rot"].value = _gl_mat(self.rot if rot is None else rot)
-        u["fov"].value = math.radians(self.fov.get(mode, 90.0))
-        u["mode"].value = mode
-        u["proj"].value = self.src.projection if self.src else 0
-        u["half_fov"].value = math.radians(lens["fov"]) / 2
-        u["radius"].value = lens["radius"]
-        u["c_front"].value = tuple(lens["front_center"])
-        u["c_back"].value = tuple(lens["back_center"])
-        u["back_rot"].value = _gl_mat(_mul(_mul(_ry(y), _rx(p)), _rz(r)))
-        u["seams"].value = int(self.seams if seams is None else seams)
-        u["blend"].value = math.radians(lens.get("blend", DEFAULT_LENS["blend"]))
-        for i, t in enumerate(self.tex):
-            t.use(i)
-        self.vao.render(self.mgl.TRIANGLE_STRIP)
+        self.st.draw(size or self.glfw.get_framebuffer_size(self.win), mode, self.rot if rot is None else rot,
+                     self.fov.get(mode, 90.0), self.lens, self.seams if seams is None else seams,
+                     self.src.projection if self.src else 0)
         if size is None:
-            self._draw_overlay(fw, fh)
+            self._draw_overlay(*self.glfw.get_framebuffer_size(self.win))
 
     def run(self, src: FrameSource) -> int:
         glfw = self.glfw
@@ -1017,6 +1082,8 @@ class Viewer:
         b_fps, mbit = 0, None
         title = None
         self.src = src
+        if self.webcam_at_start:
+            self._webcam_toggle()
         try:
             while not glfw.window_should_close(self.win):
                 glfw.poll_events()
@@ -1042,10 +1109,13 @@ class Viewer:
                 self._draw(src.width, src.height)
                 glfw.swap_buffers(self.win)
                 finish()
+                self._webcam_state()
                 fov = f" {self.fov[self.mode]:.0f}°" if self.mode in self.fov else ""
                 state = ("calibrating…" if self.calib else "paused" if self.paused
                          else "ended" if src.ended and not src.still
                          else "photo" if src.still else f"{fps:.0f} fps" + (f" {mbit:.1f} Mbit/s" if mbit else ""))
+                if self.webcam:
+                    state = "● WEBCAM — " + state
                 if self.recorder:
                     r = int(self.recorder.seconds())
                     state = f"● REC {r // 60}:{r % 60:02d} — " + state
@@ -1057,9 +1127,11 @@ class Viewer:
         except KeyboardInterrupt:
             pass
         finally:
+            self._webcam_close()
             if self.recorder:
                 rec, self.recorder = self.recorder, None
-                src.tee = None
+                if rec.write in src.tees:
+                    src.tees.remove(rec.write)
                 done = threading.Event()
                 rec.stop(lambda ok: done.set())
                 done.wait(15)
@@ -1071,11 +1143,11 @@ class Viewer:
         return 0
 
 
-def view_stream(src: IO[bytes], log=print, title: str = "Gear 360 live") -> int:
-    v = Viewer(title, log)
+def view_stream(src: IO[bytes], log=print, title: str = "Gear 360 live", webcam: bool = False) -> int:
+    v = Viewer(title, log, webcam)
     return v.run(live_source(src, log))
 
 
-def view_file(path: str, log=print) -> int:
-    v = Viewer(f"Gear 360 — {pathlib.Path(path).name}", log)
+def view_file(path: str, log=print, webcam: bool = False) -> int:
+    v = Viewer(f"Gear 360 — {pathlib.Path(path).name}", log, webcam)
     return v.run(file_source(path, v.max_texture))

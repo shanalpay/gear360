@@ -6,6 +6,8 @@ and runs this with --direct. Phone relay: connect a phone running Samsung's Gear
 
   info                         enter live-view mode and print the camera's capabilities + stream URLs
   live --view                  stitched 360° live view: drag to turn the sphere, wheel to zoom, V for views
+  live --view --webcam         ... and publish it as virtual webcams for OBS (normal view + 360° equirect)
+  live --webcam                virtual webcams only, no window (normal view looks straight ahead)
   live --play                  show the live view in a window (raw dual fisheye)
   live --out FILE.mp4 [--seconds]  save the live view (HEVC, dual fisheye, no re-encode)
   live --raw FILE [--seconds]  save Samsung's untouched TTTS stream
@@ -13,7 +15,7 @@ and runs this with --direct. Phone relay: connect a phone running Samsung's Gear
   view [FILE]                  360° viewer for the camera's photos/videos or a saved stream (no camera needed)
   calibrate FILE               measure the stitch calibration from a photo/video/stream (the viewer's A key)
   install-desktop              add the g360 icon and "Gear 360 Viewer" / "Gear 360 Live" to the app menu
-  live --v4l2 /dev/video10     publish the live view as a virtual webcam (OBS)
+  live --v4l2 /dev/video10     publish the raw dual-fisheye picture as a webcam (use --view --webcam instead)
   shoot                        take a photo
   record --seconds N           record a video on the camera's card, print the file URL
 """
@@ -72,17 +74,21 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--quality", default="high", choices=["high", "middle", "low", "recording", "gearvr"])
     lv.add_argument("--replay", metavar="RAW_FILE",
                     help="use a saved raw stream (from --raw) instead of the camera; no phone or camera needed")
-    out = lv.add_mutually_exclusive_group(required=True)
+    out = lv.add_mutually_exclusive_group()
     out.add_argument("--view", action="store_true", help="stitched, interactive 360° window")
     out.add_argument("--play", action="store_true", help="raw dual-fisheye window (ffplay)")
     out.add_argument("--out", metavar="FILE", help=".mp4/.mkv: remuxed HEVC (no re-encode)")
     out.add_argument("--raw", metavar="FILE", help="save Samsung's untouched TTTS stream")
     out.add_argument("--v4l2", metavar="DEVICE")
     lv.add_argument("--seconds", type=float, default=10.0, help="with --out / --raw")
+    lv.add_argument("--webcam", action="store_true",
+                    help="publish virtual webcams for OBS (setup once: sudo sh tools/setup_webcam.sh); "
+                         "with --view the window steers the normal view, alone it runs without a window")
     vw = sub.add_parser("view")
     vw.add_argument("file", nargs="?",
                     help="dual-fisheye photo/video from the camera, .hevc, or a raw stream from live --raw "
                          "(omitted: choose one in a dialog)")
+    vw.add_argument("--webcam", action="store_true", help="publish virtual webcams for OBS while viewing")
     sub.add_parser("install-desktop")
     cb = sub.add_parser("calibrate")
     cb.add_argument("file", help="dual-fisheye photo/video, .hevc, or a raw stream from live --raw")
@@ -90,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     rc = sub.add_parser("record")
     rc.add_argument("--seconds", type=float, default=10.0)
     a = ap.parse_args(argv)
+    if a.cmd == "live" and not (a.view or a.play or a.out or a.raw or a.v4l2 or a.webcam):
+        ap.error("live: choose --view, --play, --webcam, --out, --raw or --v4l2")
 
     log = lambda m: print(m, file=sys.stderr)
     if a.cmd == "calibrate":
@@ -108,7 +116,10 @@ def main(argv: list[str] | None = None) -> int:
             path = r.stdout.strip()
             if not path:
                 return 1
-        return viewer.view_file(path, log=log)
+        return viewer.view_file(path, log=log, webcam=a.webcam)
+    if a.cmd == "live" and a.replay and a.webcam:
+        from . import viewer, webcam
+        return webcam.serve(viewer.file_source(a.replay), log=log)
     if a.cmd == "live" and a.replay:
         src = open(a.replay, "rb")
         print(f"replaying {a.replay}", file=sys.stderr)
@@ -156,7 +167,10 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         if a.view:
             from . import viewer
-            return viewer.view_stream(src, log=log)
+            return viewer.view_stream(src, log=log, webcam=a.webcam)
+        if a.webcam:
+            from . import viewer, webcam
+            return webcam.serve(viewer.live_source(src, log), log=log)
         if a.play:
             return stream.play(src, log=log)
         if a.v4l2:

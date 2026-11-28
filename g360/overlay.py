@@ -10,7 +10,7 @@ import math
 import time
 
 # (name, label) in bar order; "play" shows Pause while playing, "hide" collapses the bar to one small button.
-BUTTONS = [("snapshot", "Snapshot"), ("record", "Record"), ("stop", "Stop"), ("play", "Pause"),
+BUTTONS = [("snapshot", "Snapshot"), ("record", "Record"), ("stop", "Stop"), ("webcam", "Webcam"), ("play", "Pause"),
            ("library", "Library"), ("reset", "Reset view"), ("hide", "Hide")]
 TOAST_SECONDS = 3.5
 
@@ -58,7 +58,7 @@ class Overlay:
         rec = state.get("recording")
         key = (w, h, scale, self.visible, self.hover, self.pressed, self.toast and self.toast[0],
                None if rec is None else int(rec), state.get("paused"), state.get("can_record"),
-               state.get("can_stop"))
+               state.get("can_stop"), state.get("webcam"))
         if key == self._key:
             return None
         self._key = key
@@ -84,7 +84,10 @@ class Overlay:
                     label = "Play"
                 if name == "record" and rec is not None:
                     label = f"{int(rec) // 60}:{int(rec) % 60:02d}"
-                self._button(cr, name, label, enabled, rec is not None and name == "record")
+                active = (rec is not None and name == "record") or (name == "webcam" and state.get("webcam"))
+                if name == "webcam" and state.get("webcam"):
+                    label = "Webcam on"
+                self._button(cr, name, label, enabled, active)
             top = y0
         else:
             self._button(cr, "show", None, True, False, alpha=0.75)
@@ -141,7 +144,8 @@ class Overlay:
         cr.new_path()             # the label's text position must not join the icon's path
         _ICONS["play-paused" if name == "play" and self._paused else name](cr, cx, cy, 11 * s, a, active)
         if label:
-            color = (1.0, 0.45, 0.4, a) if active else (1, 1, 1, 0.9 * a)
+            color = ((0.45, 0.95, 0.55, a) if name == "webcam" else (1.0, 0.45, 0.4, a)) if active \
+                else (1, 1, 1, 0.9 * a)
             self._text(cr, label, cx, y + bh - 12 * s, 11 * s, color)
 
     def _text(self, cr, text, x, y, size, rgba, center=True):
@@ -208,6 +212,28 @@ def _play_triangle(cr, cx, cy, r, a, active):
     cr.fill()
 
 
+def _webcam(cr, cx, cy, r, a, active):
+    _white(cr, a)
+    cr.arc(cx, cy - 0.15 * r, 0.75 * r, 0, 2 * math.pi)          # body
+    cr.fill()
+    cr.set_source_rgba(0.06, 0.07, 0.09, a)
+    cr.arc(cx, cy - 0.15 * r, 0.38 * r, 0, 2 * math.pi)          # lens
+    cr.fill()
+    if active:
+        cr.set_source_rgba(0.35, 0.95, 0.5, a)
+    else:
+        _white(cr, a)
+    cr.arc(cx, cy - 0.15 * r, 0.18 * r, 0, 2 * math.pi)
+    cr.fill()
+    _white(cr, a)
+    cr.move_to(cx - 0.2 * r, cy + 0.55 * r)                       # stand
+    cr.line_to(cx + 0.2 * r, cy + 0.55 * r)
+    cr.line_to(cx + 0.55 * r, cy + 0.95 * r)
+    cr.line_to(cx - 0.55 * r, cy + 0.95 * r)
+    cr.close_path()
+    cr.fill()
+
+
 def _library(cr, cx, cy, r, a, active):
     _white(cr, a)
     q = 0.82 * r
@@ -243,6 +269,6 @@ def _chevron(cr, cx, cy, r, a, up):
     cr.stroke()
 
 
-_ICONS = {"snapshot": _snapshot, "record": _record, "stop": _stop, "play": _pause, "library": _library,
+_ICONS = {"snapshot": _snapshot, "record": _record, "stop": _stop, "webcam": _webcam, "play": _pause, "library": _library,
           "reset": _reset, "hide": lambda cr, cx, cy, r, a, act: _chevron(cr, cx, cy, r, a, False),
           "show": lambda cr, cx, cy, r, a, act: _chevron(cr, cx, cy, r, a, True), "play-paused": _play_triangle}

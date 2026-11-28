@@ -311,6 +311,16 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   level and centred on the view's heading, and adds a GPano XMP APP1 segment; the viewer recognises such files
   (`equirectangular` in the first 64 KB) and samples them as equirectangular. Record tees the demuxed HEVC from
   the feeder thread into `ffmpeg -c copy -tag:v hvc1` MP4, starting at the next VPS (keyframe every 15 frames).
+- Virtual webcams (g360/webcam.py): first rendered in the viewer process into offscreen framebuffers: only
+  ~15 fps. Cause: since the Nov 26 boot the X screen's primary GPU is the Intel iGPU (xrandr providers:
+  modesetting = Source Output, NVIDIA-G0 = Sink Output only, no render offload), so the viewer window, OBS (1080p60
+  scene from the capture card) and the side-panel fractals all render on the UHD 770; the 4070 Ti sat in P8 at
+  210 MHz. With OBS running even the plain viewer dropped from 60 to ~28 Hz (glFinish 27 ms). A synchronous
+  glReadPixels also took 5-13 ms per output while holding the interpreter lock (RGBA reads are ~2x faster than RGB).
+  Now a separate process renders headless on EGL device 0 (the 4070 Ti; `G360_EGL_DEVICE` overrides), fed the
+  HEVC stream from the next keyframe (bounded queue, drops to the next keyframe if it falls behind) and the view
+  state as JSON lines over a socketpair; readback through two alternating pixel buffers (one frame of delay).
+  Test (file sinks): all 199/199 frames of a real-time source on both outputs.
 - Camera-side shutter during live view (`X_TimerlOperation Start`): returned at once, Bluetooth then reported two
   `shot-rst success`, and the live stream stopped (no data, socket idle) until the session was restarted. The
   camera's dial was on Looping Video with a 5 s self-timer; StopRecord afterwards returned the previous file

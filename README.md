@@ -15,8 +15,9 @@ Samsung's app; no Samsung code is included. Not affiliated with or endorsed by S
 - Demux the camera's live stream (Samsung "TTTS" container → HEVC, 2560×1280, 29.97 fps, dual fisheye)
 - **360° viewer**: stitched on the GPU live (about 0.5 s behind the camera), turn the sphere with the mouse
   like on the phone (drag, flick, roll, zoom), little planet, panorama; also for the camera's photos and videos
-- Show the raw picture in a window, save it as MP4 without re-encoding, or publish it as a virtual webcam
-  (v4l2loopback) for OBS
+- **Virtual webcams for OBS**: the stitched normal view and the full 360° equirectangular picture as two
+  camera devices (v4l2loopback), rendered headless on the NVIDIA GPU
+- Show the raw picture in a window, or save it as MP4 without re-encoding
 - Take a photo and start/stop video recording (implemented from captured traffic)
 
 ## Planned
@@ -60,6 +61,20 @@ save the live stream as MP4 (dual fisheye, no re-encode), **Play/Pause**, **Libr
 in its own window so the live view keeps running), **Reset view**. Files go to `~/Pictures/Gear 360`. The bar
 uses python3-cairo (part of the desktop install).
 
+### Virtual webcams (OBS)
+One-time setup (installs v4l2loopback and creates the devices at every boot):
+```bash
+sudo sh tools/setup_webcam.sh
+```
+Then start the live view with the webcams on, `sudo python3 tools/native_session.py --webcam` (or press **Webcam**
+/ `W` in the viewer; `--webcam-only` runs without a window). In OBS add **Video Capture Device (V4L2)** and pick:
+- **Gear 360**: 1920×1080, whatever the viewer shows (view, direction, zoom, little planet...), without the controls;
+- **Gear 360 equirect**: 2560×1280, the full 360° picture, level and facing the camera's front. For a 360° YouTube
+  live stream set the OBS canvas to 2:1 (e.g. 2560×1280) and mark the stream as 360° in YouTube Studio.
+
+The webcams are rendered by a separate headless process on the NVIDIA GPU (EGL), so they keep 30 fps even when
+the desktop's iGPU is busy with OBS and the viewer window. A third device is left for OBS's own Virtual Camera.
+
 Stitch calibration: press `A` in the viewer (or run `python3 -m g360 calibrate FILE`) to measure this camera's lens
 alignment from the picture and save it to `~/.config/g360/lens.json`; works best when there is detail a metre or
 more away around the sides of the camera. Manual: `[` `]` field of view, `Ctrl+arrows` and `,` `.` back-lens
@@ -78,8 +93,7 @@ camera at the seam can still show a small step (the two lenses are ~2 cm apart);
    g360 info                                  # capabilities and stream URLs
    g360 live --play                           # live window (dual fisheye)
    g360 live --out clip.mp4 --seconds 10      # save live view
-   sudo modprobe v4l2loopback video_nr=10 card_label="Gear 360" exclusive_caps=1
-   g360 live --v4l2 /dev/video10              # virtual webcam for OBS
+   g360 live --view --webcam                  # viewer + virtual webcams for OBS (setup below)
    g360 shoot                                 # take a photo
    g360 record --seconds 5                    # record to the camera's card
    ```
@@ -98,6 +112,8 @@ in [NOTES.md](NOTES.md).
 | `g360/ttts.py` | demuxer for the live-stream container |
 | `g360/stream.py` | window / file / virtual-webcam outputs via ffmpeg |
 | `g360/viewer.py` | GPU-stitched interactive 360° viewer (moderngl + glfw) |
+| `g360/webcam.py` | virtual webcams: headless EGL stitcher process, v4l2loopback outputs |
+| `tools/setup_webcam.sh` | one-time v4l2loopback setup (3 devices) |
 | `g360/overlay.py` | on-screen control bar (cairo), hit testing |
 | `g360/calibrate.py` | measures the stitch calibration (lens FOV, back-lens offset and tilt) from footage |
 | `g360/xgesture.py` | touchpad pinch and touchscreen input on X11 (XInput 2.2/2.4), which GLFW lacks |

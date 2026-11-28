@@ -23,6 +23,7 @@ Run from the project root:
   sudo python3 tools/native_session.py [--hold 60]     (libwsm2.so: see g360.wsm.find_lib)
   ... tools/native_session.py --view                      # 360° live view (mouse turns the sphere); ends when closed
   ... tools/native_session.py --play                      # raw dual-fisheye live window
+  ... tools/native_session.py --webcam                    # live view + virtual webcams for OBS (setup: tools/setup_webcam.sh)
   ... tools/native_session.py --then "live --out a.mp4 --seconds 30"   # any g360 command, run as you (not root)
 """
 import argparse
@@ -328,6 +329,10 @@ def main() -> int:
                          'until it exits, e.g. --then "live --play"')
     ap.add_argument("--view", action="store_const", dest="then", const="live --view",
                     help='stitched 360° live view you can turn with the mouse: shorthand for --then "live --view"')
+    ap.add_argument("--webcam", action="store_const", dest="then", const="live --view --webcam",
+                    help="live view with the virtual webcams on (OBS: \"Gear 360\" and \"Gear 360 equirect\")")
+    ap.add_argument("--webcam-only", action="store_const", dest="then", const="live --webcam",
+                    help="virtual webcams only, no window")
     ap.add_argument("--play", action="store_const", dest="then", const="live --play",
                     help='raw dual-fisheye live window: shorthand for --then "live --play"')
     a = ap.parse_args()
