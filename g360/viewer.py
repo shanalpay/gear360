@@ -46,6 +46,7 @@ CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or pathlib.Path.home() /
 # the circle spanning the half-frame width lines up the seams on a live capture (185° ghosts, 200° is close).
 DEFAULT_LENS = {"fov": 195.0, "radius": 0.5, "front_center": [0.5, 0.5], "back_center": [0.5, 0.5],
                 "back_ypr": [0.0, 0.0, 0.0]}
+WINDOW_SIZE = (1024, 768)
 MODES = ["perspective", "little planet", "panorama", "raw fisheye"]
 FOV_LIMITS = {0: (15.0, 150.0), 1: (60.0, 330.0)}
 FOV_DEFAULT = {0: 90.0, 1: 290.0}
@@ -320,10 +321,20 @@ class Viewer:
         if hasattr(glfw, "X11_CLASS_NAME"):        # WM_CLASS, matched by the desktop entry (icon, name)
             glfw.window_hint_string(glfw.X11_CLASS_NAME, icon.WM_CLASS)
             glfw.window_hint_string(glfw.X11_INSTANCE_NAME, icon.WM_CLASS)
-        self.win = glfw.create_window(1280, 720, title, None, None)
+        # A 1024x768 window, never larger than 75% of the monitor's work area: GNOME maximizes new windows that
+        # nearly fill the screen. Created hidden, centred, then shown.
+        glfw.window_hint(glfw.VISIBLE, False)
+        glfw.window_hint(glfw.MAXIMIZED, False)
+        mon = glfw.get_primary_monitor()
+        mx, my, mw, mh = glfw.get_monitor_workarea(mon) if mon else (0, 0, 1920, 1080)
+        k = min(1.0, 0.75 * mw / WINDOW_SIZE[0], 0.75 * mh / WINDOW_SIZE[1])
+        w, h = int(WINDOW_SIZE[0] * k), int(WINDOW_SIZE[1] * k)
+        self.win = glfw.create_window(w, h, title, None, None)
         if not self.win:
             glfw.terminate()
             raise RuntimeError("cannot create an OpenGL 3.3 window")
+        glfw.set_window_pos(self.win, mx + (mw - w) // 2, my + (mh - h) // 2)
+        glfw.show_window(self.win)
         glfw.make_context_current(self.win)
         glfw.swap_interval(1)
         self.ctx = self.mgl.create_context()
