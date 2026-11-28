@@ -288,6 +288,18 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   real time (a buffered burst from the camera) to locate the rest.
   Result on the camera: **~0.5 s glass-to-glass** (was ~3 s).
 
+## Stitching (g360/viewer.py)
+- Frame layout (live 2560x1280): two upright fisheye images, front lens left half, back lens right half (looking
+  the opposite way, so its image is the mirror direction). The image circle (vignette edge, radius ~685 px) is
+  slightly larger than the 1280 px half-frame, so the top/bottom of each circle is cut off.
+- Model: equidistant fisheye, r = θ / (FOV/2) · 640 px around the half-frame centre. Rendering a panorama from a
+  live capture at 185/190/195/200/205°: 185° ghosts at the side seams, 195-200° line up (only close objects
+  show parallax). Default 195°; centres, radius and a back-lens yaw/pitch/roll are tunable live and saved per user.
+- Blend: linear feather over the band both lenses see (90° ± (FOV/2 - 90°)), weights normalised.
+- Colour: the stream is tagged limited range with no matrix; converted as BT.601 (ffmpeg's default), in the shader.
+- The shader samples the fisheye textures directly per window pixel (perspective, stereographic "little planet",
+  equirectangular, raw), so no intermediate panorama is built; the decoder keeps only the newest frame.
+
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
   (any value works, e.g. `SEC_RVF_ML_00:11:22:33:44:55`). g360 sends `SEC_RVF_ML_<client_id>`.

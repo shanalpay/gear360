@@ -21,7 +21,8 @@ Wi-Fi Direct modes (--p2p):
                 ipv6.method disabled connection.autoconnect no
 Run from the project root:
   sudo G360_LIBWSM=/path/to/arm64/libwsm2.so python3 tools/native_session.py [--hold 60]
-  ... tools/native_session.py --play                      # live view window; the session ends when it closes
+  ... tools/native_session.py --view                      # 360° live view (mouse turns the sphere); ends when closed
+  ... tools/native_session.py --play                      # raw dual-fisheye live window
   ... tools/native_session.py --then "live --out a.mp4 --seconds 30"   # any g360 command, run as you (not root)
 """
 import argparse
@@ -325,8 +326,10 @@ def main() -> int:
     ap.add_argument("--then", metavar="G360_ARGS",
                     help='after success run "python3 -m g360 --direct G360_ARGS" as you and keep the session up '
                          'until it exits, e.g. --then "live --play"')
+    ap.add_argument("--view", action="store_const", dest="then", const="live --view",
+                    help='stitched 360° live view you can turn with the mouse: shorthand for --then "live --view"')
     ap.add_argument("--play", action="store_const", dest="then", const="live --play",
-                    help='shorthand for --then "live --play"')
+                    help='raw dual-fisheye live window: shorthand for --then "live --play"')
     a = ap.parse_args()
     if not os.environ.get(wsm.ENV_VAR):
         print(f"set {wsm.ENV_VAR} to Samsung's arm64 libwsm2.so")

@@ -99,12 +99,18 @@ def iter_chunks(f: IO[bytes]) -> Iterator[Chunk]:
 
 
 def demux_video(src: IO[bytes], dst: IO[bytes], log=None, every: float = 10.0) -> StreamInfo:
-    """Copy the HEVC elementary stream from a TTTS stream to `dst` (e.g. ffmpeg/ffplay stdin).
+    """Copy the HEVC elementary stream from a TTTS stream to `dst` (e.g. ffmpeg/ffplay stdin)."""
+    info = read_header(src)
+    copy_video(src, dst, info, log, every)
+    return info
+
+
+def copy_video(src: IO[bytes], dst: IO[bytes], info: StreamInfo, log=None, every: float = 10.0) -> None:
+    """After read_header: copy the video payloads to `dst` until the stream or `dst` ends.
 
     With `log`, reports pacing: how far the received video runs ahead of real time since the first frame
     (a burst of frames the camera had buffered, which a player that paces by timestamps never catches up)."""
     import time
-    info = read_header(src)
     t0 = p0 = None
     last = shown = 0.0
     frames = 0
@@ -125,6 +131,5 @@ def demux_video(src: IO[bytes], dst: IO[bytes], log=None, every: float = 10.0) -
                 log(f"stream: {frames / (now - t0):.1f} fps received, video {ahead:+.2f} s vs real time "
                     f"(positive = the camera sent a buffered burst)")
                 last, shown = now, 1.0
-    except (BrokenPipeError, ValueError):
+    except (BrokenPipeError, ValueError, OSError):
         pass
-    return info

@@ -5,10 +5,12 @@ and runs this with --direct. Phone relay: connect a phone running Samsung's Gear
 --via-adb <serial>; the phone only relays HTTP, all control logic runs here.
 
   info                         enter live-view mode and print the camera's capabilities + stream URLs
-  live --play                  show the live view in a window
+  live --view                  stitched 360° live view: drag to turn the sphere, wheel to zoom, V for views
+  live --play                  show the live view in a window (raw dual fisheye)
   live --out FILE.mp4 [--seconds]  save the live view (HEVC, dual fisheye, no re-encode)
   live --raw FILE [--seconds]  save Samsung's untouched TTTS stream
-  live --replay RAW --play     play a saved raw stream (no phone or camera needed)
+  live --replay RAW --play     play a saved raw stream (no phone or camera needed; --view for 360°)
+  view FILE                    360° viewer for the camera's photos/videos or a saved stream (no camera needed)
   live --v4l2 /dev/video10     publish the live view as a virtual webcam (OBS)
   shoot                        take a photo
   record --seconds N           record a video on the camera's card, print the file URL
@@ -68,16 +70,23 @@ def main(argv: list[str] | None = None) -> int:
     lv.add_argument("--replay", metavar="RAW_FILE",
                     help="use a saved raw stream (from --raw) instead of the camera; no phone or camera needed")
     out = lv.add_mutually_exclusive_group(required=True)
-    out.add_argument("--play", action="store_true")
+    out.add_argument("--view", action="store_true", help="stitched, interactive 360° window")
+    out.add_argument("--play", action="store_true", help="raw dual-fisheye window (ffplay)")
     out.add_argument("--out", metavar="FILE", help=".mp4/.mkv: remuxed HEVC (no re-encode)")
     out.add_argument("--raw", metavar="FILE", help="save Samsung's untouched TTTS stream")
     out.add_argument("--v4l2", metavar="DEVICE")
     lv.add_argument("--seconds", type=float, default=10.0, help="with --out / --raw")
+    vw = sub.add_parser("view")
+    vw.add_argument("file", help="dual-fisheye photo/video from the camera, .hevc, or a raw stream from live --raw")
     sub.add_parser("shoot")
     rc = sub.add_parser("record")
     rc.add_argument("--seconds", type=float, default=10.0)
     a = ap.parse_args(argv)
 
+    log = lambda m: print(m, file=sys.stderr)
+    if a.cmd == "view" or (a.cmd == "live" and a.replay and a.view):
+        from . import viewer
+        return viewer.view_file(a.file if a.cmd == "view" else a.replay, log=log)
     if a.cmd == "live" and a.replay:
         src = open(a.replay, "rb")
         print(f"replaying {a.replay}", file=sys.stderr)
@@ -123,8 +132,11 @@ def main(argv: list[str] | None = None) -> int:
             print("g360: no live stream. In Samsung's app use Gallery -> PHONE tab (not Camera, not GEAR 360).",
                   file=sys.stderr)
             return 3
+        if a.view:
+            from . import viewer
+            return viewer.view_stream(src, log=log)
         if a.play:
-            return stream.play(src, log=lambda m: print(m, file=sys.stderr))
+            return stream.play(src, log=log)
         if a.v4l2:
             return stream.to_v4l2(src, a.v4l2)
         if a.raw:

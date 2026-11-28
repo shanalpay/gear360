@@ -13,13 +13,16 @@ Samsung's app; no Samsung code is included. Not affiliated with or endorsed by S
 - Wi-Fi Direct with the PC as group owner (a private, patched wpa_supplicant), so no phone is needed
 - Switch the camera into live view and read its capabilities (resolutions, modes, EV/ISO/WB ranges, stream URLs)
 - Demux the camera's live stream (Samsung "TTTS" container → HEVC, 2560×1280, 29.97 fps, dual fisheye)
-- Show it in a window, save it as MP4 without re-encoding, or publish it as a virtual webcam (v4l2loopback) for OBS
+- **360° viewer**: stitched on the GPU live (about 0.5 s behind the camera), turn the sphere with the mouse
+  like on the phone (drag, flick, roll, zoom), little planet, panorama; also for the camera's photos and videos
+- Show the raw picture in a window, save it as MP4 without re-encoding, or publish it as a virtual webcam
+  (v4l2loopback) for OBS
 - Take a photo and start/stop video recording (implemented from captured traffic)
 
 ## Planned
 - One `g360` command that does the native session itself (today: `tools/native_session.py`)
 - Gallery: list, download and delete photos/videos over Wi-Fi (USB/MTP download already works with any MTP tool)
-- GPU stitching of the dual-fisheye picture into equirectangular 360° video, with metadata for YouTube 360
+- Export stitched equirectangular 360° video/photos with metadata for YouTube 360
 
 ## Requirements
 - Linux, Python 3.10+, `ffmpeg`/`ffplay`
@@ -29,6 +32,7 @@ Samsung's app; no Samsung code is included. Not affiliated with or endorsed by S
   The Wi-Fi interface is taken from NetworkManager during the session (Wi-Fi internet drops; Ethernet stays).
 - Phone relay mode instead: an Android phone (Android 9 or earlier; Android 10+ randomizes the Wi-Fi Direct
   address and the camera refuses it) with Samsung's Gear 360 app, connected over USB with debugging enabled
+- 360° viewer: OpenGL 3.3 and `.venv/bin/pip install moderngl glfw` (picked up from the project's `.venv`)
 - Optional: `v4l2loopback` for the virtual webcam
 
 ## Usage (native)
@@ -36,11 +40,19 @@ Samsung's app; no Samsung code is included. Not affiliated with or endorsed by S
 sh tools/build_wpa_supplicant.sh        # once, no root: builds tmp/wpa-build/wpa_supplicant
 python3 tools/pair.py                   # once: camera in pairing mode (hold Menu -> "Gear 360 Manager" -> Record)
 export G360_LIBWSM=/path/to/arm64-v8a/libwsm2.so
-sudo -E python3 tools/native_session.py --play            # live window; the session ends when it closes
+sudo -E python3 tools/native_session.py --view            # 360° live view; the session ends when it closes
+sudo -E python3 tools/native_session.py --play            # raw dual-fisheye window
 sudo -E python3 tools/native_session.py --then "live --out clip.mp4 --seconds 30"
 sudo -E python3 tools/native_session.py --then "shoot"
 ```
 `--then` runs any `g360` command below (as you, not root) while the Bluetooth and Wi-Fi Direct session stays up.
+
+### 360° viewer
+`python3 -m g360 view PHOTO.jpg|VIDEO.mp4` works offline for the camera's own files (and `live --raw` captures).
+Left-drag turns the sphere in any direction (the picture follows the pointer; flick to spin), right-drag rolls,
+the wheel zooms. `V` cycles perspective / little planet / panorama / raw, `L` keeps the horizon level, `R` resets,
+`F` fullscreen, `S` screenshot, `Space` pause. Lens calibration: `[` `]` field of view, `Ctrl+arrows` and `,` `.`
+back-lens alignment, `K` shows the blend band, `Ctrl+S` saves to `~/.config/g360/lens.json`.
 
 ## Usage (phone relay mode)
 1. In Samsung's app, connect to the camera, open **Camera** until the preview appears, then switch to **Gallery**
@@ -70,6 +82,7 @@ in [NOTES.md](NOTES.md).
 | `g360/upnp.py` | SOAP control: live view, shutter, recording, capabilities |
 | `g360/ttts.py` | demuxer for the live-stream container |
 | `g360/stream.py` | window / file / virtual-webcam outputs via ffmpeg |
+| `g360/viewer.py` | GPU-stitched interactive 360° viewer (moderngl + glfw) |
 | `g360/transport.py` | HTTP directly or relayed through a phone's `curl` over adb |
 | `g360/bt.py` | Bluetooth identifiers and message types (protocol client in progress) |
 | `g360/elfemu.py` | minimal AArch64 shared-library runner (Unicorn) |
