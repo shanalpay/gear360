@@ -54,6 +54,12 @@ Left-drag turns the sphere in any direction (the picture follows the pointer; fl
 the wheel zooms; on a touchpad pinch/spread zooms, on a touchscreen one finger turns and two pinch. `V` cycles perspective / little planet / panorama / raw, `L` keeps the horizon level, `R` resets,
 `F` fullscreen, `S` screenshot, `Space` pause.
 
+On-screen controls (bottom bar, hidden with its Hide button or `H`): **Snapshot** saves a stitched 360° photo
+(equirectangular JPEG with Photo Sphere metadata, opens as 360° in this viewer and elsewhere), **Record** / **Stop**
+save the live stream as MP4 (dual fisheye, no re-encode), **Play/Pause**, **Library** (pick a saved file; it opens
+in its own window so the live view keeps running), **Reset view**. Files go to `~/Pictures/Gear 360`. The bar
+uses python3-cairo (part of the desktop install).
+
 Stitch calibration: press `A` in the viewer (or run `python3 -m g360 calibrate FILE`) to measure this camera's lens
 alignment from the picture and save it to `~/.config/g360/lens.json`; works best when there is detail a metre or
 more away around the sides of the camera. Manual: `[` `]` field of view, `Ctrl+arrows` and `,` `.` back-lens
@@ -92,6 +98,7 @@ in [NOTES.md](NOTES.md).
 | `g360/ttts.py` | demuxer for the live-stream container |
 | `g360/stream.py` | window / file / virtual-webcam outputs via ffmpeg |
 | `g360/viewer.py` | GPU-stitched interactive 360° viewer (moderngl + glfw) |
+| `g360/overlay.py` | on-screen control bar (cairo), hit testing |
 | `g360/calibrate.py` | measures the stitch calibration (lens FOV, back-lens offset and tilt) from footage |
 | `g360/xgesture.py` | touchpad pinch and touchscreen input on X11 (XInput 2.2/2.4), which GLFW lacks |
 | `g360/icon.py` | the app icon (drawn by a shader) and the app-menu install |

@@ -9,11 +9,15 @@ Mouse (like dragging the picture on the phone):
   right drag         roll
   wheel / + -        zoom
 Touchpad: pinch / spread zooms (moving the fingers also turns). Touchscreen: one finger turns, two pinch/spread.
+On-screen controls (bottom bar; H or its Hide button hides it): Snapshot saves a stitched 360° photo
+(equirectangular JPEG with 360 metadata), Record / Stop save the live stream (MP4, no re-encode), Play/Pause
+freezes the view, Library opens the saved files, Reset view. Files go to ~/Pictures/Gear 360.
 Keys:
   V                  view: perspective -> little planet -> panorama (equirectangular) -> raw dual fisheye
   L                  keep the horizon level (yaw/pitch only) instead of free rotation
   R                  reset the view          F / F11   fullscreen          Space   pause
   S                  save a screenshot of the window to ~/Pictures
+  H                  hide / show the on-screen controls
   Q / Esc            quit
 Lens calibration (saved with Ctrl+S to ~/.config/g360/lens.json):
   [ ]                lens field of view -/+ 0.5°
@@ -157,6 +161,8 @@ class FrameSource:
                 _grow_pipe(f.fileno())
         self.frame: bytearray | None = None
         self.seq, self.ended, self.bytes_in = 0, False, 0
+        self.live, self.projection = False, 0       # projection: 0 dual fisheye, 1 equirectangular
+        self.tee = None                             # called with every chunk of the input (recording)
         self._lock = threading.Lock()
         if feed:
             threading.Thread(target=self._feed, args=(feed,), daemon=True).start()
@@ -207,7 +213,9 @@ def live_source(src: IO[bytes], log=None) -> FrameSource:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
            "-probesize", "32", "-analyzeduration", "0", "-f", "hevc", "-framerate", "30000/1001", "-i", "pipe:0",
            *_DECODE_OUT]
-    return FrameSource(cmd, info.width, info.height, feed=lambda dst: ttts.copy_video(src, dst, info, log))
+    fs = FrameSource(cmd, info.width, info.height, feed=lambda dst: ttts.copy_video(src, dst, info, log))
+    fs.live = True
+    return fs
 
 
 class _Counting:
@@ -218,6 +226,9 @@ class _Counting:
 
     def write(self, b):
         self.owner.bytes_in += len(b)
+        tee = self.owner.tee
+        if tee:
+            tee(b)
         return self.dst.write(b)
 
 
@@ -259,7 +270,19 @@ def file_source(path: str, max_size: int = 16384) -> FrameSource:
     else:
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", *pre, "-i", str(p),
                *vf, "-s", f"{w}x{h}", "-an", *_DECODE_OUT]
-    return FrameSource(cmd, w, h, still=still)
+    fs = FrameSource(cmd, w, h, still=still)
+    fs.projection = 1 if still and is_equirect(p) else 0
+    return fs
+
+
+def is_equirect(path) -> bool:
+    """A stitched 360° photo (GPano XMP, as written by Snapshot and most 360 software), not dual fisheye."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(1 << 16)
+    except OSError:
+        return False
+    return b"equirectangular" in head
 
 
 # ---- rendering -------------------------------------------------------------------------------------------------
@@ -285,6 +308,7 @@ uniform vec2 c_back;
 uniform mat3 back_rot;       // back-lens alignment
 uniform int seams;
 uniform float blend;          // width of the cross-fade at the seam (radians)
+uniform int proj;            // source: 0 dual fisheye, 1 equirectangular (a stitched 360° photo)
 in vec2 ndc;
 out vec4 color;
 const float PI = 3.14159265358979;
@@ -347,6 +371,14 @@ vec3 sphere(vec3 d) {
     return col;
 }
 
+vec3 equirect(vec3 d) {
+    vec2 uv = vec2(atan(d.x, d.z) / (2.0 * PI) + 0.5, 0.5 - asin(clamp(d.y, -1.0, 1.0)) / PI);
+    vec2 gx = dFdx(uv), gy = dFdy(uv);
+    gx.x -= round(gx.x);                    // across the back seam u jumps by 1: not a real gradient
+    gy.x -= round(gy.x);
+    return rgb(uv, gx, gy);
+}
+
 void main() {
     float aspect = win.x / win.y;
     vec2 p = vec2(ndc.x * aspect, ndc.y);
@@ -371,9 +403,96 @@ void main() {
         color = vec4(rgb(uv, gx, gy), 1.0);
         return;
     }
-    color = vec4(sphere(rot * d), 1.0);
+    color = vec4(proj == 1 ? equirect(rot * d) : sphere(rot * d), 1.0);
 }
 """
+
+
+OVERLAY_FRAG = """#version 330
+uniform sampler2D ov;
+in vec2 ndc;
+out vec4 color;
+void main() { color = texture(ov, vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5)); }   // premultiplied alpha
+"""
+
+
+def library_dir() -> pathlib.Path:
+    """Where Snapshot and Record save: <XDG Pictures>/Gear 360."""
+    try:
+        pics = subprocess.run(["xdg-user-dir", "PICTURES"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        pics = ""
+    base = pathlib.Path(pics) if pics and pics != str(pathlib.Path.home()) else pathlib.Path.home() / "Pictures"
+    return base / "Gear 360"
+
+
+def _gpano_xmp(w: int, h: int) -> bytes:
+    """An APP1 XMP segment marking a JPEG as an equirectangular 360° photo (Google Photo Sphere tags)."""
+    xmp = (f'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+           f'<rdf:Description rdf:about="" xmlns:GPano="http://ns.google.com/photos/1.0/panorama/" '
+           f'GPano:ProjectionType="equirectangular" GPano:UsePanoramaViewer="True" '
+           f'GPano:FullPanoWidthPixels="{w}" GPano:FullPanoHeightPixels="{h}" '
+           f'GPano:CroppedAreaImageWidthPixels="{w}" GPano:CroppedAreaImageHeightPixels="{h}" '
+           f'GPano:CroppedAreaLeftPixels="0" GPano:CroppedAreaTopPixels="0"/></rdf:RDF></x:xmpmeta>').encode()
+    body = b"http://ns.adobe.com/xap/1.0/\x00" + xmp
+    return b"\xff\xe1" + (len(body) + 2).to_bytes(2, "big") + body
+
+
+def _insert_app1(jpeg: bytes, seg: bytes) -> bytes:
+    """Put an APP segment after SOI and the JFIF APP0 (if any)."""
+    i = 2
+    if jpeg[2:4] == b"\xff\xe0":
+        i = 4 + int.from_bytes(jpeg[4:6], "big")
+    return jpeg[:i] + seg + jpeg[i:]
+
+
+class Recorder:
+    """Saves the live HEVC stream to an MP4 (stream copy, no re-encode), starting at the next keyframe
+    (the camera sends one every 15 frames). Fed from the decoder's feeder thread through FrameSource.tee."""
+
+    def __init__(self, path: pathlib.Path):
+        self.path = path
+        self.proc = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-fflags", "+genpts",
+                                      "-f", "hevc", "-framerate", "30000/1001", "-i", "pipe:0", "-c", "copy",
+                                      "-tag:v", "hvc1", "-movflags", "+faststart", "-y", str(path)],
+                                     stdin=subprocess.PIPE)
+        self.t0: float | None = None
+        self.failed = False
+        self._lock = threading.Lock()
+        self._open = True
+
+    def write(self, b: bytes):
+        with self._lock:
+            if not self._open:
+                return
+            if self.t0 is None:
+                if b"\x00\x00\x01\x40\x01" not in b:          # wait for a VPS (starts each keyframe)
+                    return
+                self.t0 = time.monotonic()
+            try:
+                self.proc.stdin.write(b)
+            except OSError:
+                self.failed, self._open = True, False
+
+    def seconds(self) -> float:
+        return 0.0 if self.t0 is None else time.monotonic() - self.t0
+
+    def stop(self, done=None):
+        """Close the file in the background (the MP4 index is written at the end); done(ok) afterwards."""
+        with self._lock:
+            self._open = False
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+
+        def wait():
+            ok = self.proc.wait() == 0 and not self.failed and self.t0 is not None
+            if not ok and self.path.exists() and self.t0 is None:
+                self.path.unlink()
+            if done:
+                done(ok)
+        threading.Thread(target=wait, daemon=True).start()
 
 
 def save_lens(lens: dict):
@@ -435,6 +554,18 @@ class Viewer:
         self.vel = (0.0, 0.0, 0.0)    # yaw, pitch, roll rad/s (view frame) for the flick
         self.last_move = 0.0
         self.fullscreen_restore = None
+        self.src: FrameSource | None = None
+        self.recorder: Recorder | None = None
+        self.messages: list[str] = []     # from background threads, shown by the main loop
+        self.overlay = None
+        try:
+            from .overlay import Overlay
+            self.overlay = Overlay()
+            self.ov_prog = self.ctx.program(vertex_shader=VERT, fragment_shader=OVERLAY_FRAG)
+            self.ov_vao = self.ctx.vertex_array(self.ov_prog, [(quad, "2f", "pos")])
+            self.ov_tex = None
+        except Exception as e:      # no python3-cairo: keyboard only
+            log(f"viewer: no on-screen controls ({e})")
         glfw.set_cursor_pos_callback(self.win, self._on_move)
         glfw.set_mouse_button_callback(self.win, self._on_button)
         glfw.set_scroll_callback(self.win, lambda w, dx, dy: self._zoom(0.9 ** dy))
@@ -471,9 +602,26 @@ class Viewer:
         else:
             self.rot = _orthonormalize(_mul(_mul(_mul(self.rot, _ry(yaw)), _rx(-pitch)), _rz(roll)))
 
+    def _to_fb(self, x: float, y: float):
+        """Window coordinates -> framebuffer pixels (they differ on HiDPI screens)."""
+        ww, wh = self.glfw.get_window_size(self.win)
+        fw, fh = self.glfw.get_framebuffer_size(self.win)
+        return x * fw / max(ww, 1), y * fh / max(wh, 1)
+
     def _on_button(self, win, button, action, mods):
         glfw = self.glfw
         x, y = glfw.get_cursor_pos(win)
+        ov = self.overlay
+        if ov and button == glfw.MOUSE_BUTTON_LEFT:
+            hit = ov.hit(*self._to_fb(x, y))
+            if action == glfw.PRESS and (hit or ov.contains(*self._to_fb(x, y))):
+                ov.pressed = hit
+                return
+            if action == glfw.RELEASE and ov.pressed:
+                name, ov.pressed = ov.pressed, None
+                if hit == name:
+                    self._button(name)
+                return
         if action == glfw.PRESS:
             self.drag, self.vel = (button, x, y), (0.0, 0.0, 0.0)
             self.last_move = time.monotonic()
@@ -483,6 +631,8 @@ class Viewer:
             self.drag = None
 
     def _on_move(self, win, x, y):
+        if self.overlay:
+            self.overlay.hover = None if self.drag else self.overlay.hit(*self._to_fb(x, y))
         if not self.drag:
             return
         button, x0, y0 = self.drag
@@ -518,6 +668,13 @@ class Viewer:
             self._drag(e["dx"], e["dy"])
         elif kind == "pinch-end":
             self.pinch_fov = None
+        elif kind == "touch-begin" and self.overlay and self.overlay.contains(*self._to_fb(e["x"], e["y"])):
+            self.overlay.pressed = self.overlay.hit(*self._to_fb(e["x"], e["y"]))
+            self.tap = e["id"]
+        elif kind == "touch-end" and getattr(self, "tap", None) == e["id"]:
+            name, self.overlay.pressed, self.tap = self.overlay.pressed, None, None
+            if name and self.overlay.hit(*self._to_fb(e["x"], e["y"])) == name:
+                self._button(name)
         elif kind == "touch-begin":
             self.touches[e["id"]] = (e["x"], e["y"])
             self.vel, self.last_move = (0.0, 0.0, 0.0), time.monotonic()
@@ -568,9 +725,7 @@ class Viewer:
         elif key == g.KEY_R and ctrl:
             self.lens = json.loads(json.dumps(DEFAULT_LENS))
         elif key == g.KEY_R:
-            self.vel = (0.0, 0.0, 0.0)
-            self.fov = {0: FOV_DEFAULT[0], 1: FOV_DEFAULT[1]}
-            self._set_mode(self.mode)
+            self._reset_view()
         elif key in (g.KEY_F, g.KEY_F11):
             self._toggle_fullscreen()
         elif key == g.KEY_SPACE:
@@ -582,6 +737,8 @@ class Viewer:
             self._screenshot()
         elif key == g.KEY_K:
             self.seams = not self.seams
+        elif key == g.KEY_H and self.overlay:
+            self.overlay.visible = not self.overlay.visible
         elif key == g.KEY_A and action == g.PRESS:
             self._start_calibration()
         elif key in (g.KEY_EQUAL, g.KEY_KP_ADD):
@@ -604,6 +761,131 @@ class Viewer:
             step = math.radians(5)
             self.turn({g.KEY_LEFT: -step, g.KEY_RIGHT: step}.get(key, 0.0),
                       {g.KEY_UP: step, g.KEY_DOWN: -step}.get(key, 0.0))
+
+    def _reset_view(self):
+        self.vel = (0.0, 0.0, 0.0)
+        self.fov = {0: FOV_DEFAULT[0], 1: FOV_DEFAULT[1]}
+        self._set_mode(self.mode)
+
+    # ---- on-screen controls ----
+    def _say(self, text: str):
+        self.log(f"viewer: {text}")
+        if self.overlay:
+            self.overlay.say(text)
+
+    def _button(self, name: str):
+        ov = self.overlay
+        if name == "snapshot":
+            self._snapshot()
+        elif name == "record":
+            self._record_start()
+        elif name == "stop":
+            self._record_stop()
+        elif name == "play":
+            self.paused = not self.paused
+        elif name == "library":
+            self._library()
+        elif name == "reset":
+            self._reset_view()
+        elif name in ("hide", "show"):
+            ov.visible = name == "show"
+            ov.hover = None
+
+    def _snapshot(self):
+        """Save the current picture as a stitched equirectangular 360° JPEG, centred where the view looks."""
+        src = self.src
+        if not src or not self.tex:
+            return
+        w = min(src.width, self.max_texture) // 2 * 2
+        h = w // 2
+        f = [self.rot[0][2], self.rot[1][2], self.rot[2][2]]
+        rot = _ry(math.atan2(f[0], f[2])) if self.mode != 3 else _eye()     # level, facing the view's heading
+        fbo = self.ctx.framebuffer(color_attachments=[self.ctx.renderbuffer((w, h), 3)])
+        try:
+            fbo.use()
+            self._draw(src.width, src.height, size=(w, h), mode=2, rot=rot, seams=False)
+            data = fbo.read(components=3)
+        finally:
+            self.ctx.screen.use()
+            fbo.release()
+        out = library_dir() / time.strftime("360-%Y%m%d-%H%M%S.jpg")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(["ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
+                            "-i", "-", "-vf", "vflip", "-q:v", "2", "-f", "mjpeg", "-"], input=data,
+                           capture_output=True)
+        if r.returncode or not r.stdout.startswith(b"\xff\xd8"):
+            self._say("snapshot failed")
+            return
+        out.write_bytes(_insert_app1(r.stdout, _gpano_xmp(w, h)))
+        self._say(f"Saved {out.name}")
+
+    def _record_start(self):
+        src = self.src
+        if not src or not src.live or self.recorder:
+            return
+        out = library_dir() / time.strftime("360-%Y%m%d-%H%M%S.mp4")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        self.recorder = Recorder(out)
+        src.tee = self.recorder.write
+        self._say("Recording")
+
+    def _record_stop(self):
+        rec, self.recorder = self.recorder, None
+        if not rec:
+            return
+        if self.src:
+            self.src.tee = None
+        secs = rec.seconds()
+        rec.stop(lambda ok: self.messages.append(
+            f"Saved {rec.path.name} ({int(secs) // 60}:{int(secs) % 60:02d})" if ok else "recording failed"))
+
+    def _library(self):
+        """Choose a saved file (a file dialog in the library folder); it opens in its own viewer window, so
+        the live view keeps running."""
+        lib = library_dir()
+        lib.mkdir(parents=True, exist_ok=True)
+
+        def choose():
+            try:
+                r = subprocess.run(["zenity", "--file-selection", "--title=Gear 360 library",
+                                    f"--filename={lib}/",
+                                    "--file-filter=Photos and videos | *.jpg *.JPG *.jpeg *.mp4 *.MP4 *.hevc *.bin",
+                                    "--file-filter=All files | *"], capture_output=True, text=True)
+            except OSError:
+                subprocess.Popen(["xdg-open", str(lib)])
+                return
+            path = r.stdout.strip()
+            if path:
+                subprocess.Popen([sys.executable, "-m", "g360", "view", path], cwd=str(ROOT))
+        threading.Thread(target=choose, daemon=True).start()
+
+    def _draw_overlay(self, fw: int, fh: int):
+        ov = self.overlay
+        if not ov:
+            return
+        while self.messages:
+            self._say(self.messages.pop(0))
+        src = self.src
+        scale = max(self.glfw.get_window_content_scale(self.win)[0], fh / max(self.glfw.get_window_size(self.win)[1], 1))
+        img = ov.frame(fw, fh, scale, {"recording": self.recorder.seconds() if self.recorder else None,
+                                       "paused": self.paused, "can_record": bool(src and src.live),
+                                       "can_stop": self.recorder is not None})
+        if img is not None:
+            if not self.ov_tex or self.ov_tex.size != (fw, fh):
+                if self.ov_tex:
+                    self.ov_tex.release()
+                self.ov_tex = self.ctx.texture((fw, fh), 4, dtype="f1")
+                self.ov_tex.swizzle = "BGRA"          # cairo ARGB32 is BGRA in memory (little-endian)
+                self.ov_tex.filter = (self.mgl.NEAREST, self.mgl.NEAREST)
+            self.ov_tex.write(img)
+        if not self.ov_tex:
+            return
+        self.ov_tex.use(3)
+        self.ov_prog["ov"].value = 3
+        self.ctx.enable(self.mgl.BLEND)
+        self.ctx.blend_func = (self.mgl.ONE, self.mgl.ONE_MINUS_SRC_ALPHA)
+        self.ov_vao.render(self.mgl.TRIANGLE_STRIP)
+        self.ctx.disable(self.mgl.BLEND)
 
     def _toggle_fullscreen(self):
         g = self.glfw
@@ -642,7 +924,7 @@ class Viewer:
             self.sample_t = now
 
     def _start_calibration(self):
-        if self.calib or not self.samples:
+        if self.calib or not self.samples or (self.src and self.src.projection):
             return
         w, h = self.samples[-1][1:]
         frames = [f for f, fw, fh in self.samples if (fw, fh) == (w, h)]
@@ -696,30 +978,37 @@ class Viewer:
         for t in self.tex:
             t.build_mipmaps()
 
-    def _draw(self, w: int, h: int):
-        fw, fh = self.glfw.get_framebuffer_size(self.win)
+    def _draw(self, w: int, h: int, size=None, mode=None, rot=None, seams=None):
+        """Draw the picture into the window, or (size, mode, rot) into the bound framebuffer (Snapshot)."""
+        fw, fh = size or self.glfw.get_framebuffer_size(self.win)
+        mode = self.mode if mode is None else mode
         self.ctx.viewport = (0, 0, fw, fh)
         self.ctx.clear(0.0, 0.0, 0.0)
         if not self.tex:
+            if size is None:
+                self._draw_overlay(fw, fh)
             return
         lens = self.lens
         y, p, r = (math.radians(v) for v in lens["back_ypr"])
         u = self.prog
         u["tex_size"].value = (float(w), float(h))
         u["win"].value = (float(fw), float(fh))
-        u["rot"].value = _gl_mat(self.rot)
-        u["fov"].value = math.radians(self.fov.get(self.mode, 90.0))
-        u["mode"].value = self.mode
+        u["rot"].value = _gl_mat(self.rot if rot is None else rot)
+        u["fov"].value = math.radians(self.fov.get(mode, 90.0))
+        u["mode"].value = mode
+        u["proj"].value = self.src.projection if self.src else 0
         u["half_fov"].value = math.radians(lens["fov"]) / 2
         u["radius"].value = lens["radius"]
         u["c_front"].value = tuple(lens["front_center"])
         u["c_back"].value = tuple(lens["back_center"])
         u["back_rot"].value = _gl_mat(_mul(_mul(_ry(y), _rx(p)), _rz(r)))
-        u["seams"].value = int(self.seams)
+        u["seams"].value = int(self.seams if seams is None else seams)
         u["blend"].value = math.radians(lens.get("blend", DEFAULT_LENS["blend"]))
         for i, t in enumerate(self.tex):
             t.use(i)
         self.vao.render(self.mgl.TRIANGLE_STRIP)
+        if size is None:
+            self._draw_overlay(fw, fh)
 
     def run(self, src: FrameSource) -> int:
         glfw = self.glfw
@@ -727,6 +1016,7 @@ class Viewer:
         shown, t_prev, t_fps, n_fps, fps = -1, time.monotonic(), time.monotonic(), 0, 0.0
         b_fps, mbit = 0, None
         title = None
+        self.src = src
         try:
             while not glfw.window_should_close(self.win):
                 glfw.poll_events()
@@ -756,6 +1046,9 @@ class Viewer:
                 state = ("calibrating…" if self.calib else "paused" if self.paused
                          else "ended" if src.ended and not src.still
                          else "photo" if src.still else f"{fps:.0f} fps" + (f" {mbit:.1f} Mbit/s" if mbit else ""))
+                if self.recorder:
+                    r = int(self.recorder.seconds())
+                    state = f"● REC {r // 60}:{r % 60:02d} — " + state
                 t = (f"{self.title} — {MODES[self.mode]}{fov}{' (level)' if self.level else ''} — {state} — "
                      f"lens {self.lens['fov']:.1f}° back {self.lens['back_ypr']}")
                 if t != title:
@@ -764,6 +1057,13 @@ class Viewer:
         except KeyboardInterrupt:
             pass
         finally:
+            if self.recorder:
+                rec, self.recorder = self.recorder, None
+                src.tee = None
+                done = threading.Event()
+                rec.stop(lambda ok: done.set())
+                done.wait(15)
+                self.log(f"viewer: saved {rec.path}")
             src.close()
             if self.gestures:
                 self.gestures.close()

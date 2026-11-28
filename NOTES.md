@@ -305,6 +305,19 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   wide double image. Now a 4° cross-fade at 90° (`blend` in lens.json): leftover misalignment shows as a short
   step instead of a ghost. Objects close to the camera can never line up for all distances at once (the lens
   centres are ~2 cm apart: ~2.5° of parallax at 0.5 m), so keep near subjects off the seam (face a lens at them).
+- On-screen controls (g360/overlay.py): cairo draws the bar into a window-sized ARGB32 image, uploaded as a
+  BGRA-swizzled texture and blended premultiplied over the picture; redrawn only when its state changes.
+  Snapshot renders the panorama shader into an offscreen framebuffer at the source width (2560x1280 live),
+  level and centred on the view's heading, and adds a GPano XMP APP1 segment; the viewer recognises such files
+  (`equirectangular` in the first 64 KB) and samples them as equirectangular. Record tees the demuxed HEVC from
+  the feeder thread into `ffmpeg -c copy -tag:v hvc1` MP4, starting at the next VPS (keyframe every 15 frames).
+- Camera-side shutter during live view (`X_TimerlOperation Start`): returned at once, Bluetooth then reported two
+  `shot-rst success`, and the live stream stopped (no data, socket idle) until the session was restarted. The
+  camera's dial was on Looping Video with a 5 s self-timer; StopRecord afterwards returned the previous file
+  (360_0019.MP4), FileCount unchanged. The phone app likely uses Bluetooth `cmd-req remote-shot`/mode changes and
+  reconnects the stream (`livestream_recording.avi` while recording): not done yet, so the viewer's Snapshot and
+  Record work on the PC side. GetInformation also returns `CalData` and `OpaiData` (the camera's own lens
+  calibration, probably what Samsung's stitcher uses): not decoded yet.
 - Colour: the stream is tagged limited range with no matrix; converted as BT.601 (ffmpeg's default), in the shader.
 - The shader samples the fisheye textures directly per window pixel (perspective, stereographic "little planet",
   equirectangular, raw), so no intermediate panorama is built; the decoder keeps only the newest frame.
