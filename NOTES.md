@@ -286,6 +286,7 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   paced at camera speed; with arrival-time timestamps, a tiny probe, `low_delay` (no frame threads) and
   `-framedrop` that is ~0.1 s. `g360 live --play` now also reports how far the received video runs ahead of
   real time (a buffered burst from the camera) to locate the rest.
+  Result on the camera: **~0.5 s glass-to-glass** (was ~3 s).
 
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
