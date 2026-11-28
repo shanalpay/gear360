@@ -304,6 +304,7 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   gradients are taken explicitly before branching. The low-delay decode was checked frame by frame against a
   normal decode of a capture: identical after the first (incomplete) GOP, same order (the stream has B-frames).
 - The viewer title shows received fps and Mbit/s (the phone relay measured ~18 Mbit/s for "high").
+- **Live view ran at 6 fps (fixed)**: the camera link was fine (−33 dBm, MCS15) but the socket receive queue was full. On NVIDIA, the wait for vsync happened inside the next moderngl call, which holds Python's interpreter lock, so the threads feeding and reading ffmpeg starved (each 5 MB frame took ~75 pipe reads, each one waiting for the lock). Fix: call glFinish through ctypes (lock released) after each swap, and grow the pipes to 1 MB with F_SETPIPE_SZ. Saved stream through the viewer: 10 → ~48 frames shown per second (decode ~63 fps; `-flags low_delay` makes the HEVC decoder single-threaded, still 2× real time).
 
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**

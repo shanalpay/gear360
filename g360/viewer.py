@@ -25,6 +25,9 @@ Needs moderngl and glfw (`.venv/bin/pip install moderngl glfw`; found in the pro
 from __future__ import annotations
 
 import array
+import ctypes
+import ctypes.util
+import fcntl
 import glob
 import json
 import math
@@ -111,6 +114,30 @@ def _gl_mat(m):
 
 
 # ---- frame sources: ffmpeg decodes to raw yuv420p, a thread keeps only the newest frame --------------------------
+def _grow_pipe(fd: int):
+    try:
+        size = int(pathlib.Path("/proc/sys/fs/pipe-max-size").read_text())
+        fcntl.fcntl(fd, 1031, min(size, 8 << 20))      # F_SETPIPE_SZ
+    except (OSError, ValueError):
+        pass
+
+
+def _gl_finish():
+    """glFinish through ctypes, which lets go of the interpreter lock while it waits. Called after each
+    buffer swap, so the wait for the display's refresh happens here instead of inside the next moderngl call,
+    which keeps the lock and starves the threads that feed and read the decoder (10 fps instead of 30)."""
+    for name in ("GL", "OpenGL"):
+        lib = ctypes.util.find_library(name)
+        if lib:
+            try:
+                fn = ctypes.CDLL(lib).glFinish
+                fn.restype, fn.argtypes = None, []
+                return fn
+            except (OSError, AttributeError):
+                pass
+    return lambda: None
+
+
 class FrameSource:
     def __init__(self, cmd: list[str], width: int, height: int, feed=None, still: bool = False):
         if not shutil.which(cmd[0]):
@@ -119,6 +146,11 @@ class FrameSource:
         self.size = width * height * 3 // 2
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, bufsize=0)
+        # Big pipes: a 5 MB frame then takes a handful of reads instead of ~75, and each read has to win the
+        # interpreter lock back from the render loop.
+        for f in (self.proc.stdout, self.proc.stdin):
+            if f is not None:
+                _grow_pipe(f.fileno())
         self.frame: bytearray | None = None
         self.seq, self.ended, self.bytes_in = 0, False, 0
         self._lock = threading.Lock()
@@ -643,6 +675,7 @@ class Viewer:
 
     def run(self, src: FrameSource) -> int:
         glfw = self.glfw
+        finish = _gl_finish()
         shown, t_prev, t_fps, n_fps, fps = -1, time.monotonic(), time.monotonic(), 0, 0.0
         b_fps, mbit = 0, None
         title = None
@@ -667,6 +700,7 @@ class Viewer:
                     fps, t_fps, n_fps = n_fps / (now - t_fps), now, 0
                 self._draw(src.width, src.height)
                 glfw.swap_buffers(self.win)
+                finish()
                 fov = f" {self.fov[self.mode]:.0f}°" if self.mode in self.fov else ""
                 state = ("paused" if self.paused else "ended" if src.ended and not src.still
                          else "photo" if src.still else f"{fps:.0f} fps" + (f" {mbit:.1f} Mbit/s" if mbit else ""))
