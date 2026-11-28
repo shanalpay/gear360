@@ -98,13 +98,33 @@ def iter_chunks(f: IO[bytes]) -> Iterator[Chunk]:
         yield Chunk("video" if tid.endswith(b"VD") else "audio", tid, pts, data)
 
 
-def demux_video(src: IO[bytes], dst: IO[bytes]) -> StreamInfo:
-    """Copy the HEVC elementary stream from a TTTS stream to `dst` (e.g. ffmpeg/ffplay stdin)."""
+def demux_video(src: IO[bytes], dst: IO[bytes], log=None, every: float = 10.0) -> StreamInfo:
+    """Copy the HEVC elementary stream from a TTTS stream to `dst` (e.g. ffmpeg/ffplay stdin).
+
+    With `log`, reports pacing: how far the received video runs ahead of real time since the first frame
+    (a burst of frames the camera had buffered, which a player that paces by timestamps never catches up)."""
+    import time
     info = read_header(src)
+    t0 = p0 = None
+    last = shown = 0.0
+    frames = 0
     try:
         for c in iter_chunks(src):
-            if c.kind == "video":
-                dst.write(c.data)
+            if c.kind != "video":
+                continue
+            dst.write(c.data)
+            if log is None:
+                continue
+            now = time.monotonic()
+            if t0 is None:
+                t0, p0, last = now, c.pts, now
+                continue
+            frames += 1
+            ahead = (c.pts - p0) / info.timescale - (now - t0)
+            if now - last >= (3.0 if not shown else every):
+                log(f"stream: {frames / (now - t0):.1f} fps received, video {ahead:+.2f} s vs real time "
+                    f"(positive = the camera sent a buffered burst)")
+                last, shown = now, 1.0
     except (BrokenPipeError, ValueError):
         pass
     return info

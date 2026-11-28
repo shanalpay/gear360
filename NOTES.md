@@ -281,6 +281,11 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   went BT session → mobilelink → PD → GO-NEG-SUCCESS (0.2 s) → WPS → group up on 2412 MHz →
   `device-desc-url http://192.168.49.10:7676/smp_2_` over BT (0.9 s later) → UPnP 200 → changeToRVF →
   `GetInfomation`: 2560x1280 stream at `http://192.168.49.10:7679/livestream_high.avi`. 12.6 s end to end.
+- **Live-view delay ~3 s** (first native viewing). Player side: the old ffplay settings (2 MB probe, fixed
+  29.97 fps pacing, frame-threaded HEVC decoding on 32 threads) held ~0.6 s that it never caught up, on a replay
+  paced at camera speed; with arrival-time timestamps, a tiny probe, `low_delay` (no frame threads) and
+  `-framedrop` that is ~0.1 s. `g360 live --play` now also reports how far the received video runs ahead of
+  real time (a buffered burst from the camera) to locate the rest.
 
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**

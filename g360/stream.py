@@ -29,9 +29,9 @@ def record_raw(src: IO[bytes], path: str, seconds: float) -> int:
     return n
 
 
-def _feed(src: IO[bytes], proc: subprocess.Popen, info_box: list) -> None:
+def _feed(src: IO[bytes], proc: subprocess.Popen, info_box: list, log=None) -> None:
     try:
-        info_box.append(ttts.demux_video(src, proc.stdin))
+        info_box.append(ttts.demux_video(src, proc.stdin, log=log))
     except Exception as e:  # surface parse errors instead of hanging the consumer
         print(f"g360: stream error: {e}", file=sys.stderr)
     finally:
@@ -41,12 +41,12 @@ def _feed(src: IO[bytes], proc: subprocess.Popen, info_box: list) -> None:
             pass
 
 
-def _run(cmd: list[str], src: IO[bytes]) -> int:
+def _run(cmd: list[str], src: IO[bytes], log=None) -> int:
     if not shutil.which(cmd[0]):
         raise RuntimeError(f"{cmd[0]} not installed")
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, bufsize=0)
     box: list = []
-    threading.Thread(target=_feed, args=(src, p, box), daemon=True).start()
+    threading.Thread(target=_feed, args=(src, p, box, log), daemon=True).start()
     try:
         return p.wait()
     except KeyboardInterrupt:
@@ -57,11 +57,16 @@ def _run(cmd: list[str], src: IO[bytes]) -> int:
 # Raw HEVC carries no timestamps: tell ffmpeg the camera's rate (TTTS pts step 4004 @ 120 kHz = 29.97 fps).
 _HEVC_IN = ["-f", "hevc", "-framerate", "30000/1001", "-i", "pipe:0"]
 _QUIET = ["-hide_banner", "-loglevel", "warning"]
-_LOW_LATENCY = ["-fflags", "nobuffer", "-probesize", "2000000", "-analyzeduration", "500000"]
+# Live window: show each frame when it arrives instead of on a fixed 29.97 fps schedule (which never works off
+# a backlog), probe almost nothing before starting, and no frame-threaded decoding (`low_delay`: with 32 CPU
+# threads that alone holds back ~16 frames). Measured on a paced replay of a capture: 0.11 s of player delay,
+# against 0.62 s with the old settings.
+_PLAY_LIVE = ["-fflags", "nobuffer", "-flags", "low_delay", "-framedrop", "-probesize", "32", "-analyzeduration", "0",
+              "-sync", "ext", "-use_wallclock_as_timestamps", "1", "-f", "hevc", "-i", "pipe:0"]
 
 
-def play(src: IO[bytes]) -> int:
-    return _run(["ffplay", *_QUIET, *_LOW_LATENCY, "-window_title", "Gear 360 live (dual fisheye)", *_HEVC_IN], src)
+def play(src: IO[bytes], log=None) -> int:
+    return _run(["ffplay", *_QUIET, "-window_title", "Gear 360 live (dual fisheye)", *_PLAY_LIVE], src, log)
 
 
 def play_looped(src: IO[bytes]) -> int:
@@ -90,5 +95,6 @@ def to_file(src: IO[bytes], path: str, seconds: float | None = None) -> int:
 def to_v4l2(src: IO[bytes], device: str = "/dev/video10", width: int = 1920, height: int = 960) -> int:
     """Publish as a virtual webcam (needs v4l2loopback: `sudo modprobe v4l2loopback video_nr=10
     card_label="Gear 360" exclusive_caps=1`). Scaled down by default; OBS handles 1920x960 easily."""
-    return _run(["ffmpeg", *_QUIET, *_LOW_LATENCY, *_HEVC_IN, "-vf", f"scale={width}:{height}",
+    return _run(["ffmpeg", *_QUIET, "-fflags", "nobuffer", "-flags", "low_delay", "-probesize", "32",
+                 "-analyzeduration", "0", *_HEVC_IN, "-vf", f"scale={width}:{height}",
                  "-pix_fmt", "yuv420p", "-f", "v4l2", device], src)

@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
                   file=sys.stderr)
             return 3
         if a.play:
-            return stream.play(src)
+            return stream.play(src, log=lambda m: print(m, file=sys.stderr))
         if a.v4l2:
             return stream.to_v4l2(src, a.v4l2)
         if a.raw:
