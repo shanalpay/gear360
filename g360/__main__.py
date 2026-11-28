@@ -1,7 +1,8 @@
 """Command line: python3 -m g360 [--via-adb SERIAL | --direct] [--ip IP] <command> ...
 
-Until native Bluetooth/Wi-Fi Direct bring-up exists, connect a phone running Samsung's Gear 360 app to
-the camera first and pass --via-adb <serial>; the phone only relays HTTP, all control logic runs here.
+Native: `sudo -E python3 tools/native_session.py --then "<command> ..."` brings up Bluetooth and Wi-Fi Direct
+and runs this with --direct. Phone relay: connect a phone running Samsung's Gear 360 app to the camera and pass
+--via-adb <serial>; the phone only relays HTTP, all control logic runs here.
 
   info                         enter live-view mode and print the camera's capabilities + stream URLs
   live --play                  show the live view in a window

@@ -21,6 +21,8 @@ Wi-Fi Direct modes (--p2p):
                 ipv6.method disabled connection.autoconnect no
 Run from the project root:
   sudo G360_LIBWSM=/path/to/arm64/libwsm2.so python3 tools/native_session.py [--hold 60]
+  ... tools/native_session.py --play                      # live view window; the session ends when it closes
+  ... tools/native_session.py --then "live --out a.mp4 --seconds 30"   # any g360 command, run as you (not root)
 """
 import argparse
 import contextlib
@@ -28,6 +30,7 @@ import glob
 import os
 import pathlib
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -267,6 +270,8 @@ def session(a, log, host: str, cam: str, announce: str, wpa: dict) -> int:
             caps = camera.enter_live_view()
             log(f"*** NATIVE CONTROL WORKS: {caps.raw.get('StreamingInfo', {}).get('Default')} stream at "
                 f"{caps.stream_urls.get('high')}; {caps.raw.get('AVAILSHOTS')} shots left ***")
+            if a.then:
+                return run_as_user(["--direct", "--ip", ip, *shlex.split(a.then)], log)
             log(f"holding the session for {a.hold:.0f} s (try: python3 -m g360 --direct live --play)")
             time.sleep(a.hold)
             return 0
@@ -278,6 +283,28 @@ def session(a, log, host: str, cam: str, announce: str, wpa: dict) -> int:
             subprocess.run(["nmcli", "connection", "down", a.profile], capture_output=True)
         else:
             wpa_cleanup(wpa.get("iface"), wpa.get("ctrl_dir"))
+
+
+def run_as_user(g360_args: list[str], log) -> int:
+    """Run `python3 -m g360 ARGS` as the user who ran sudo, with their desktop environment (DISPLAY etc.),
+    while this process keeps the Bluetooth and Wi-Fi Direct session up; returns its exit code."""
+    env, kw = dict(os.environ), {}
+    if os.geteuid() == 0 and os.environ.get("SUDO_UID"):
+        try:        # sudo's own environment is the one it was started with
+            raw = pathlib.Path(f"/proc/{os.getppid()}/environ").read_bytes()
+            env = dict(x.split("=", 1) for x in raw.decode(errors="replace").split("\0") if "=" in x)
+        except OSError:
+            pass
+        uid, gid = int(os.environ["SUDO_UID"]), int(os.environ["SUDO_GID"])
+        kw = {"user": uid, "group": gid, "extra_groups": os.getgrouplist(os.environ["SUDO_USER"], gid)}
+    cmd = [sys.executable, "-m", "g360", *g360_args]
+    log(f"running: {shlex.join(cmd[1:])} (the session stays up until it exits)")
+    try:
+        rc = subprocess.run(cmd, cwd=ROOT, env=env, **kw).returncode
+    except KeyboardInterrupt:
+        rc = 130
+    log(f"g360 exited {rc}")
+    return rc
 
 
 def main() -> int:
@@ -295,6 +322,11 @@ def main() -> int:
                     help=f"address handed to the camera in provision discovery (default {DEFAULT_IP}, as the phone does)")
     ap.add_argument("--profile", default="gear360-p2p")
     ap.add_argument("--hold", type=float, default=60, help="seconds to keep the session up after success")
+    ap.add_argument("--then", metavar="G360_ARGS",
+                    help='after success run "python3 -m g360 --direct G360_ARGS" as you and keep the session up '
+                         'until it exits, e.g. --then "live --play"')
+    ap.add_argument("--play", action="store_const", dest="then", const="live --play",
+                    help='shorthand for --then "live --play"')
     a = ap.parse_args()
     if not os.environ.get(wsm.ENV_VAR):
         print(f"set {wsm.ENV_VAR} to Samsung's arm64 libwsm2.so")

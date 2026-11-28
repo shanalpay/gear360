@@ -4,30 +4,43 @@ Unofficial Linux control, live-view and gallery software for the original Samsun
 360° camera, whose Android app is no longer distributed. Built by observing how the camera talks to
 Samsung's app; no Samsung code is included. Not affiliated with or endorsed by Samsung.
 
-> **Status: work in progress.** Camera control and the live stream work today, but only when a phone
-> running Samsung's app holds the Bluetooth link and relays HTTP for us over `adb`. Native Bluetooth
-> (Samsung Accessory Protocol) and Wi-Fi Direct on Linux are being built next. Not supported: the
-> 2017 Gear 360 (SM-R210).
+> **Status: work in progress.** Fully native: this PC pairs with the camera over Bluetooth, brings up
+> Wi-Fi Direct as group owner and controls the camera with no phone involved (about 15 s from power-on
+> to live view). The older phone-relay mode still works. Not supported: the 2017 Gear 360 (SM-R210).
 
 ## What works
+- Native Bluetooth pairing and session (Samsung Accessory Protocol over BlueZ)
+- Wi-Fi Direct with the PC as group owner (a private, patched wpa_supplicant), so no phone is needed
 - Switch the camera into live view and read its capabilities (resolutions, modes, EV/ISO/WB ranges, stream URLs)
 - Demux the camera's live stream (Samsung "TTTS" container → HEVC, 2560×1280, 29.97 fps, dual fisheye)
 - Show it in a window, save it as MP4 without re-encoding, or publish it as a virtual webcam (v4l2loopback) for OBS
 - Take a photo and start/stop video recording (implemented from captured traffic)
 
 ## Planned
-- Native Bluetooth pairing and session (Samsung Accessory Protocol over BlueZ)
-- Wi-Fi Direct with the PC as group owner (wpa_supplicant), so no phone is needed
+- One `g360` command that does the native session itself (today: `tools/native_session.py`)
 - Gallery: list, download and delete photos/videos over Wi-Fi (USB/MTP download already works with any MTP tool)
 - GPU stitching of the dual-fisheye picture into equirectangular 360° video, with metadata for YouTube 360
 
 ## Requirements
-- Linux, Python 3.10+ (standard library only), `ffmpeg`/`ffplay`
-- For now: an Android phone (Android 9 or earlier works; Android 10+ randomizes the Wi-Fi Direct address and the
-  camera refuses it) with Samsung's Gear 360 app, connected to the PC with USB debugging enabled
+- Linux, Python 3.10+, `ffmpeg`/`ffplay`
+- Native mode: BlueZ (with `dbus-python` and PyGObject), a Wi-Fi card that supports P2P GO (tested: Intel AX211),
+  `dnsmasq`, `iw`, `ethtool`, NetworkManager, root for the session; `pip install unicorn pyelftools` and
+  Samsung's `libwsm2.so` (arm64) from the SAccessoryService APK, pointed to by `G360_LIBWSM` (not included here).
+  The Wi-Fi interface is taken from NetworkManager during the session (Wi-Fi internet drops; Ethernet stays).
+- Phone relay mode instead: an Android phone (Android 9 or earlier; Android 10+ randomizes the Wi-Fi Direct
+  address and the camera refuses it) with Samsung's Gear 360 app, connected over USB with debugging enabled
 - Optional: `v4l2loopback` for the virtual webcam
-- For the native Bluetooth work in progress: `pip install unicorn pyelftools` and Samsung's `libwsm2.so` (arm64)
-  from the SAccessoryService APK, pointed to by `G360_LIBWSM` (not included here)
+
+## Usage (native)
+```bash
+sh tools/build_wpa_supplicant.sh        # once, no root: builds tmp/wpa-build/wpa_supplicant
+python3 tools/pair.py                   # once: camera in pairing mode (hold Menu -> "Gear 360 Manager" -> Record)
+export G360_LIBWSM=/path/to/arm64-v8a/libwsm2.so
+sudo -E python3 tools/native_session.py --play            # live window; the session ends when it closes
+sudo -E python3 tools/native_session.py --then "live --out clip.mp4 --seconds 30"
+sudo -E python3 tools/native_session.py --then "shoot"
+```
+`--then` runs any `g360` command below (as you, not root) while the Bluetooth and Wi-Fi Direct session stays up.
 
 ## Usage (phone relay mode)
 1. In Samsung's app, connect to the camera, open **Camera** until the preview appears, then switch to **Gallery**
@@ -61,6 +74,11 @@ in [NOTES.md](NOTES.md).
 | `g360/bt.py` | Bluetooth identifiers and message types (protocol client in progress) |
 | `g360/elfemu.py` | minimal AArch64 shared-library runner (Unicorn) |
 | `g360/wsm.py` | pairing authentication computed by Samsung's libwsm2 under emulation |
+| `g360/sap.py`, `g360/bluez.py` | Samsung Accessory Protocol session over BlueZ RFCOMM |
+| `g360/p2p.py`, `g360/wpactrl.py` | private wpa_supplicant for Wi-Fi Direct and its control-socket client |
+| `tools/native_session.py` | native session: Bluetooth + Wi-Fi Direct + UPnP, optionally running a `g360` command |
+| `tools/build_wpa_supplicant.sh` | builds the patched wpa_supplicant 2.10 into `tmp/` |
+| `tools/pair.py` | Bluetooth pairing with the camera |
 | `tools/streamtest.py` | capture and analyse a few seconds of live stream through a phone |
 
 ## License
