@@ -120,7 +120,7 @@ class FrameSource:
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if feed else subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, bufsize=0)
         self.frame: bytearray | None = None
-        self.seq, self.ended = 0, False
+        self.seq, self.ended, self.bytes_in = 0, False, 0
         self._lock = threading.Lock()
         if feed:
             threading.Thread(target=self._feed, args=(feed,), daemon=True).start()
@@ -128,7 +128,7 @@ class FrameSource:
 
     def _feed(self, feed):
         try:
-            feed(self.proc.stdin)
+            feed(_Counting(self.proc.stdin, self))
         finally:
             try:
                 self.proc.stdin.close()
@@ -172,6 +172,17 @@ def live_source(src: IO[bytes], log=None) -> FrameSource:
            "-probesize", "32", "-analyzeduration", "0", "-f", "hevc", "-framerate", "30000/1001", "-i", "pipe:0",
            *_DECODE_OUT]
     return FrameSource(cmd, info.width, info.height, feed=lambda dst: ttts.copy_video(src, dst, info, log))
+
+
+class _Counting:
+    """File-like wrapper counting the bytes written (the received video bitrate, shown in the title)."""
+
+    def __init__(self, dst, owner):
+        self.dst, self.owner = dst, owner
+
+    def write(self, b):
+        self.owner.bytes_in += len(b)
+        return self.dst.write(b)
 
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
@@ -241,24 +252,52 @@ in vec2 ndc;
 out vec4 color;
 const float PI = 3.14159265358979;
 
-vec3 rgb(vec2 uv) {          // limited-range BT.601 (the stream is tagged tv range, no matrix: ffmpeg's default)
-    float y = (texture(ty, uv).r - 16.0 / 255.0) * 1.164383;
-    float u = texture(tu, uv).r - 0.5;
-    float v = texture(tv, uv).r - 0.5;
+// limited-range BT.601 (the stream is tagged tv range, no matrix: ffmpeg's default). Explicit gradients pick the
+// mipmap level: implicit ones are undefined where neighbouring pixels take different branches (lens edges).
+float catmull_rom(sampler2D t, vec2 uv, vec2 size) {   // bicubic in 9 bilinear taps, for magnified luma
+    vec2 sp = uv * size;
+    vec2 p1 = floor(sp - 0.5) + 0.5;
+    vec2 f = sp - p1;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+    vec2 q0 = (p1 - 1.0) / size, q3 = (p1 + 2.0) / size, q12 = (p1 + w2 / w12) / size;
+    return textureLod(t, vec2(q0.x, q0.y), 0.0).r * w0.x * w0.y
+         + textureLod(t, vec2(q12.x, q0.y), 0.0).r * w12.x * w0.y
+         + textureLod(t, vec2(q3.x, q0.y), 0.0).r * w3.x * w0.y
+         + textureLod(t, vec2(q0.x, q12.y), 0.0).r * w0.x * w12.y
+         + textureLod(t, vec2(q12.x, q12.y), 0.0).r * w12.x * w12.y
+         + textureLod(t, vec2(q3.x, q12.y), 0.0).r * w3.x * w12.y
+         + textureLod(t, vec2(q0.x, q3.y), 0.0).r * w0.x * w3.y
+         + textureLod(t, vec2(q12.x, q3.y), 0.0).r * w12.x * w3.y
+         + textureLod(t, vec2(q3.x, q3.y), 0.0).r * w3.x * w3.y;
+}
+
+vec3 rgb(vec2 uv, vec2 gx, vec2 gy) {
+    float rho = max(length(gx * tex_size), length(gy * tex_size));    // source pixels per window pixel
+    float yy = rho < 1.0 ? catmull_rom(ty, uv, tex_size) : textureGrad(ty, uv, gx, gy).r;
+    float y = (yy - 16.0 / 255.0) * 1.164383;
+    float u = textureGrad(tu, uv, gx, gy).r - 0.5;
+    float v = textureGrad(tv, uv, gx, gy).r - 0.5;
     return clamp(vec3(y + 1.596027 * v, y - 0.391762 * u - 0.812968 * v, y + 2.017232 * u), 0.0, 1.0);
 }
 
 vec4 lens(vec3 d, vec2 c, float x0) {   // d in the lens frame (z = optical axis, x right, y up)
     float th = acos(clamp(d.z, -1.0, 1.0));
-    if (th > half_fov) return vec4(0.0);
     float hw = tex_size.x * 0.5;
     float r = th / half_fov * radius * hw;
-    float ph = atan(d.y, d.x);
-    vec2 px = vec2(x0 + c.x * hw + r * cos(ph), c.y * tex_size.y - r * sin(ph));
+    float s = length(d.xy);                 // (cos, sin) of the azimuth without atan's wrap-around
+    vec2 cs = s > 1e-6 ? d.xy / s : vec2(1.0, 0.0);
+    vec2 px = vec2(x0 + c.x * hw + r * cs.x, c.y * tex_size.y - r * cs.y);
+    vec2 uv = px / tex_size;
+    vec2 gx = dFdx(uv), gy = dFdy(uv);      // taken before any branch
+    if (th > half_fov) return vec4(0.0);
     if (px.x < x0 + 0.5 || px.x > x0 + hw - 0.5 || px.y < 0.5 || px.y > tex_size.y - 0.5) return vec4(0.0);
     float m = max(half_fov - 0.5 * PI, 1e-3);
     float w = clamp((half_fov - th) / (2.0 * m), 0.0, 1.0);    // 1 inside, 0.5 at 90°, 0 at the lens edge
-    return vec4(rgb(px / tex_size) * w, w);
+    return vec4(rgb(uv, gx, gy) * w, w);
 }
 
 vec3 sphere(vec3 d) {
@@ -289,8 +328,10 @@ void main() {
         float ta = tex_size.x / tex_size.y;
         vec2 uv = ndc * 0.5 + 0.5;
         if (aspect > ta) uv.x = (uv.x - 0.5) * aspect / ta + 0.5; else uv.y = (uv.y - 0.5) * ta / aspect + 0.5;
+        uv.y = 1.0 - uv.y;
+        vec2 gx = dFdx(uv), gy = dFdy(uv);
         if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) { color = vec4(0.0, 0.0, 0.0, 1.0); return; }
-        color = vec4(rgb(vec2(uv.x, 1.0 - uv.y)), 1.0);
+        color = vec4(rgb(uv, gx, gy), 1.0);
         return;
     }
     color = vec4(sphere(rot * d), 1.0);
@@ -556,7 +597,12 @@ class Viewer:
         mk = lambda tw, th: self.ctx.texture((tw, th), 1, dtype="f1", alignment=1)
         self.tex = (mk(w, h), mk(w // 2, h // 2), mk(w // 2, h // 2))
         for i, (t, name) in enumerate(zip(self.tex, ("ty", "tu", "tv"))):
-            t.filter = (self.mgl.LINEAR, self.mgl.LINEAR)
+            # Mipmaps + anisotropic filtering: wherever the view shows the picture smaller than its pixels (raw
+            # view, little planet, panorama, the squeezed lens edges) plain bilinear sampling skips pixels and
+            # aliases (jagged, shimmering detail).
+            t.build_mipmaps()
+            t.filter = (self.mgl.LINEAR_MIPMAP_LINEAR, self.mgl.LINEAR)
+            t.anisotropy = 16.0
             t.repeat_x = t.repeat_y = False
             t.use(i)
             self.prog[name].value = i
@@ -568,6 +614,8 @@ class Viewer:
         self.tex[0].write(mv[:ys])
         self.tex[1].write(mv[ys:ys + cs])
         self.tex[2].write(mv[ys + cs:ys + 2 * cs])
+        for t in self.tex:
+            t.build_mipmaps()
 
     def _draw(self, w: int, h: int):
         fw, fh = self.glfw.get_framebuffer_size(self.win)
@@ -596,6 +644,7 @@ class Viewer:
     def run(self, src: FrameSource) -> int:
         glfw = self.glfw
         shown, t_prev, t_fps, n_fps, fps = -1, time.monotonic(), time.monotonic(), 0, 0.0
+        b_fps, mbit = 0, None
         title = None
         try:
             while not glfw.window_should_close(self.win):
@@ -612,12 +661,15 @@ class Viewer:
                     self._upload(frame, src.width, src.height)
                     shown, n_fps = seq, n_fps + 1
                 if now - t_fps >= 1.0:
+                    if src.bytes_in:
+                        mbit = (src.bytes_in - b_fps) * 8 / (now - t_fps) / 1e6
+                        b_fps = src.bytes_in
                     fps, t_fps, n_fps = n_fps / (now - t_fps), now, 0
                 self._draw(src.width, src.height)
                 glfw.swap_buffers(self.win)
                 fov = f" {self.fov[self.mode]:.0f}°" if self.mode in self.fov else ""
                 state = ("paused" if self.paused else "ended" if src.ended and not src.still
-                         else "photo" if src.still else f"{fps:.0f} fps")
+                         else "photo" if src.still else f"{fps:.0f} fps" + (f" {mbit:.1f} Mbit/s" if mbit else ""))
                 t = (f"{self.title} — {MODES[self.mode]}{fov}{' (level)' if self.level else ''} — {state} — "
                      f"lens {self.lens['fov']:.1f}° back {self.lens['back_ypr']}")
                 if t != title:

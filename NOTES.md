@@ -299,6 +299,11 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
 - Colour: the stream is tagged limited range with no matrix; converted as BT.601 (ffmpeg's default), in the shader.
 - The shader samples the fisheye textures directly per window pixel (perspective, stereographic "little planet",
   equirectangular, raw), so no intermediate panorama is built; the decoder keeps only the newest frame.
+- Sampling: mipmaps + 16x anisotropic filtering wherever the view shrinks the picture (bilinear alone aliased
+  badly in the raw view, little planet and lens edges), Catmull-Rom bicubic luma wherever it magnifies;
+  gradients are taken explicitly before branching. The low-delay decode was checked frame by frame against a
+  normal decode of a capture: identical after the first (incomplete) GOP, same order (the stream has B-frames).
+- The viewer title shows received fps and Mbit/s (the phone relay measured ~18 Mbit/s for "high").
 
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
