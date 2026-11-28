@@ -292,10 +292,19 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
 - Frame layout (live 2560x1280): two upright fisheye images, front lens left half, back lens right half (looking
   the opposite way, so its image is the mirror direction). The image circle (vignette edge, radius ~685 px) is
   slightly larger than the 1280 px half-frame, so the top/bottom of each circle is cut off.
-- Model: equidistant fisheye, r = θ / (FOV/2) · 640 px around the half-frame centre. Rendering a panorama from a
-  live capture at 185/190/195/200/205°: 185° ghosts at the side seams, 195-200° line up (only close objects
-  show parallax). Default 195°; centres, radius and a back-lens yaw/pitch/roll are tunable live and saved per user.
-- Blend: linear feather over the band both lenses see (90° ± (FOV/2 - 90°)), weights normalised.
+- Model: equidistant fisheye, r = θ / (FOV/2) · 640 px around the half-frame centre. The first default, 195°,
+  was judged by eye from panoramas and was wrong: people at the seam showed double ("ghosting at the stitch").
+- Calibration is now measured (g360/calibrate.py): sample the band 84-96° from the front axis from both lenses,
+  high-pass, and maximise the normalized correlation over FOV, back-lens centre and back-lens yaw/pitch/roll.
+  Coarse to fine: a FOV scan on blurred frames first (the error was several degrees, wider than fine detail can
+  be matched across), then Nelder-Mead on less and less blurred frames. This camera: FOV 187.1°, back centre
+  +11 px / +5 px, back yaw/pitch/roll -0.9/-1.1/+0.7°; correlation at the seam 0.03 -> 0.41. Same result from
+  1, 6 and 8 frames. Default FOV is now 187°; the per-camera offsets come from `python3 -m g360 calibrate FILE`
+  or the viewer's A key (fit runs in a subprocess so it does not starve the decoder threads).
+- Blend: was a linear feather over the whole shared band (±7.5° at 195°), which turns any misalignment into a
+  wide double image. Now a 4° cross-fade at 90° (`blend` in lens.json): leftover misalignment shows as a short
+  step instead of a ghost. Objects close to the camera can never line up for all distances at once (the lens
+  centres are ~2 cm apart: ~2.5° of parallax at 0.5 m), so keep near subjects off the seam (face a lens at them).
 - Colour: the stream is tagged limited range with no matrix; converted as BT.601 (ffmpeg's default), in the shader.
 - The shader samples the fisheye textures directly per window pixel (perspective, stereographic "little planet",
   equirectangular, raw), so no intermediate panorama is built; the decoder keeps only the newest frame.

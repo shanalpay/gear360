@@ -52,8 +52,13 @@ sudo python3 tools/native_session.py --then "shoot"
 `python3 -m g360 view PHOTO.jpg|VIDEO.mp4` works offline for the camera's own files (and `live --raw` captures).
 Left-drag turns the sphere in any direction (the picture follows the pointer; flick to spin), right-drag rolls,
 the wheel zooms; on a touchpad pinch/spread zooms, on a touchscreen one finger turns and two pinch. `V` cycles perspective / little planet / panorama / raw, `L` keeps the horizon level, `R` resets,
-`F` fullscreen, `S` screenshot, `Space` pause. Lens calibration: `[` `]` field of view, `Ctrl+arrows` and `,` `.`
-back-lens alignment, `K` shows the blend band, `Ctrl+S` saves to `~/.config/g360/lens.json`.
+`F` fullscreen, `S` screenshot, `Space` pause.
+
+Stitch calibration: press `A` in the viewer (or run `python3 -m g360 calibrate FILE`) to measure this camera's lens
+alignment from the picture and save it to `~/.config/g360/lens.json`; works best when there is detail a metre or
+more away around the sides of the camera. Manual: `[` `]` field of view, `Ctrl+arrows` and `,` `.` back-lens
+alignment, `K` shows the blend band, `Ctrl+S` saves, `Ctrl+R` returns to the defaults. Things very close to the
+camera at the seam can still show a small step (the two lenses are ~2 cm apart); point a lens at the subject.
 
 `python3 -m g360 install-desktop` adds the g360 icon and two app-menu entries:
 **Gear 360 Viewer** (also under Open With for JPEG/MP4 files) and **Gear 360 Live** (opens a terminal for sudo).
@@ -87,6 +92,7 @@ in [NOTES.md](NOTES.md).
 | `g360/ttts.py` | demuxer for the live-stream container |
 | `g360/stream.py` | window / file / virtual-webcam outputs via ffmpeg |
 | `g360/viewer.py` | GPU-stitched interactive 360° viewer (moderngl + glfw) |
+| `g360/calibrate.py` | measures the stitch calibration (lens FOV, back-lens offset and tilt) from footage |
 | `g360/xgesture.py` | touchpad pinch and touchscreen input on X11 (XInput 2.2/2.4), which GLFW lacks |
 | `g360/icon.py` | the app icon (drawn by a shader) and the app-menu install |
 | `g360/transport.py` | HTTP directly or relayed through a phone's `curl` over adb |

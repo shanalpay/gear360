@@ -11,6 +11,7 @@ and runs this with --direct. Phone relay: connect a phone running Samsung's Gear
   live --raw FILE [--seconds]  save Samsung's untouched TTTS stream
   live --replay RAW --play     play a saved raw stream (no phone or camera needed; --view for 360°)
   view [FILE]                  360° viewer for the camera's photos/videos or a saved stream (no camera needed)
+  calibrate FILE               measure the stitch calibration from a photo/video/stream (the viewer's A key)
   install-desktop              add the g360 icon and "Gear 360 Viewer" / "Gear 360 Live" to the app menu
   live --v4l2 /dev/video10     publish the live view as a virtual webcam (OBS)
   shoot                        take a photo
@@ -83,12 +84,17 @@ def main(argv: list[str] | None = None) -> int:
                     help="dual-fisheye photo/video from the camera, .hevc, or a raw stream from live --raw "
                          "(omitted: choose one in a dialog)")
     sub.add_parser("install-desktop")
+    cb = sub.add_parser("calibrate")
+    cb.add_argument("file", help="dual-fisheye photo/video, .hevc, or a raw stream from live --raw")
     sub.add_parser("shoot")
     rc = sub.add_parser("record")
     rc.add_argument("--seconds", type=float, default=10.0)
     a = ap.parse_args(argv)
 
     log = lambda m: print(m, file=sys.stderr)
+    if a.cmd == "calibrate":
+        from . import calibrate
+        return calibrate.run(a.file, log)
     if a.cmd == "install-desktop":
         from . import icon
         return icon.install_desktop(log)

@@ -1,7 +1,7 @@
 """Interactive 360° viewer: stitches the camera's dual-fisheye picture on the GPU and lets the mouse turn the sphere.
 
 The fragment shader maps every window pixel to a direction on the sphere and samples it straight from the two
-fisheye images (equidistant model, ~195° per lens), feathering across the band both lenses see, so there is no
+fisheye images (equidistant model, ~187° per lens), cross-fading in a narrow band at the seam, so there is no
 intermediate equirectangular image and no CPU work per frame beyond decoding (ffmpeg) and the texture upload.
 
 Mouse (like dragging the picture on the phone):
@@ -18,6 +18,8 @@ Keys:
 Lens calibration (saved with Ctrl+S to ~/.config/g360/lens.json):
   [ ]                lens field of view -/+ 0.5°
   Ctrl+arrows        back lens yaw/pitch -/+ 0.1°          , .    back lens roll -/+ 0.1°
+  A                  measure the calibration from the last few seconds of picture and save it (the
+                     camera should see things a metre or more away around the seam; takes ~10 s)
   K                  highlight the blend band               Ctrl+R  default calibration
 
 Needs moderngl and glfw (`.venv/bin/pip install moderngl glfw`; found in the project's .venv automatically).
@@ -45,10 +47,12 @@ from . import icon, ttts
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or pathlib.Path.home() / ".config") / "g360" / "lens.json"
-# Centres and radius are fractions of one half-frame (each lens fills a square half of the picture). 195° with
-# the circle spanning the half-frame width lines up the seams on a live capture (185° ghosts, 200° is close).
-DEFAULT_LENS = {"fov": 195.0, "radius": 0.5, "front_center": [0.5, 0.5], "back_center": [0.5, 0.5],
-                "back_ypr": [0.0, 0.0, 0.0]}
+# Centres and radius are fractions of one half-frame (each lens fills a square half of the picture). The field
+# of view is the scale that lines up the two lenses at the seam with the circle spanning the half-frame width:
+# 187° measured by calibrate.py on an SM-C200 (the back lens's small offset and tilt differ per camera: press A).
+# blend: width in degrees of the cross-fade at the seam (narrow: misalignment shows as a cut, not a ghost).
+DEFAULT_LENS = {"fov": 187.0, "radius": 0.5, "front_center": [0.5, 0.5], "back_center": [0.5, 0.5],
+                "back_ypr": [0.0, 0.0, 0.0], "blend": 4.0}
 WINDOW_SIZE = (1024, 768)
 MODES = ["perspective", "little planet", "panorama", "raw fisheye"]
 FOV_LIMITS = {0: (15.0, 150.0), 1: (60.0, 330.0)}
@@ -280,6 +284,7 @@ uniform vec2 c_front;        // lens centres, fractions of the half frame
 uniform vec2 c_back;
 uniform mat3 back_rot;       // back-lens alignment
 uniform int seams;
+uniform float blend;          // width of the cross-fade at the seam (radians)
 in vec2 ndc;
 out vec4 color;
 const float PI = 3.14159265358979;
@@ -327,8 +332,8 @@ vec4 lens(vec3 d, vec2 c, float x0) {   // d in the lens frame (z = optical axis
     vec2 gx = dFdx(uv), gy = dFdy(uv);      // taken before any branch
     if (th > half_fov) return vec4(0.0);
     if (px.x < x0 + 0.5 || px.x > x0 + hw - 0.5 || px.y < 0.5 || px.y > tex_size.y - 0.5) return vec4(0.0);
-    float m = max(half_fov - 0.5 * PI, 1e-3);
-    float w = clamp((half_fov - th) / (2.0 * m), 0.0, 1.0);    // 1 inside, 0.5 at 90°, 0 at the lens edge
+    float bw = clamp(blend, 1e-3, 2.0 * max(half_fov - 0.5 * PI, 1e-3));
+    float w = max(clamp((0.5 * PI + 0.5 * bw - th) / bw, 0.0, 1.0), 1e-4);   // 1 inside, 0.5 at 90°
     return vec4(rgb(uv, gx, gy) * w, w);
 }
 
@@ -369,6 +374,11 @@ void main() {
     color = vec4(sphere(rot * d), 1.0);
 }
 """
+
+
+def save_lens(lens: dict):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG.write_text(json.dumps(lens, indent=2) + "\n")
 
 
 def load_lens() -> dict:
@@ -417,6 +427,7 @@ class Viewer:
         self.vao = self.ctx.vertex_array(self.prog, [(quad, "2f", "pos")])
         self.tex = None
         self.lens = load_lens()
+        self.samples, self.sample_t, self.calib = [], 0.0, None      # luma frames for A, the running fit
         self.mode, self.level, self.paused, self.seams = 0, False, False, False
         self.fov = {0: FOV_DEFAULT[0], 1: FOV_DEFAULT[1]}
         self.rot = _eye()
@@ -565,13 +576,14 @@ class Viewer:
         elif key == g.KEY_SPACE:
             self.paused = not self.paused
         elif key == g.KEY_S and ctrl:
-            CONFIG.parent.mkdir(parents=True, exist_ok=True)
-            CONFIG.write_text(json.dumps(lens, indent=2) + "\n")
+            save_lens(lens)
             self.log(f"viewer: lens calibration saved to {CONFIG}")
         elif key == g.KEY_S:
             self._screenshot()
         elif key == g.KEY_K:
             self.seams = not self.seams
+        elif key == g.KEY_A and action == g.PRESS:
+            self._start_calibration()
         elif key in (g.KEY_EQUAL, g.KEY_KP_ADD):
             self._zoom(0.9)
         elif key in (g.KEY_MINUS, g.KEY_KP_SUBTRACT):
@@ -622,6 +634,41 @@ class Viewer:
                         "-i", "-", "-vf", "vflip", str(out)], input=data)
         self.log(f"viewer: saved {out}")
 
+    # ---- calibration (A) ----
+    def _keep_sample(self, frame, w: int, h: int, now: float, still: bool):
+        """Keep the luma of one frame a second (the last 6) for the calibration."""
+        if still or now - self.sample_t >= 1.0:
+            self.samples = (self.samples + [(bytes(frame[:w * h]), w, h)])[-6:]
+            self.sample_t = now
+
+    def _start_calibration(self):
+        if self.calib or not self.samples:
+            return
+        w, h = self.samples[-1][1:]
+        frames = [f for f, fw, fh in self.samples if (fw, fh) == (w, h)]
+        tmp = tempfile.NamedTemporaryFile(prefix="g360-calib-", suffix=".y", delete=False)
+        tmp.write(b"".join(frames))
+        tmp.close()
+        # In its own process: the fit is mostly Python and would otherwise take turns with the decoder threads.
+        proc = subprocess.Popen([sys.executable, "-m", "g360.calibrate", "--luma", tmp.name, str(w), str(h),
+                                 json.dumps(self.lens)], cwd=str(ROOT), stdout=subprocess.PIPE, text=True)
+        self.calib = (proc, tmp.name)
+        self.log(f"viewer: calibrating on {len(frames)} frames ...")
+
+    def _poll_calibration(self):
+        proc, path = self.calib
+        if proc.poll() is None:
+            return
+        self.calib = None
+        os.unlink(path)
+        lines = proc.stdout.read().strip().splitlines()
+        if proc.returncode or not lines:
+            self.log("viewer: calibration failed")
+            return
+        self.lens.update(json.loads(lines[-1]))
+        save_lens(self.lens)
+        self.log(f"viewer: calibration saved to {CONFIG} (Ctrl+R returns to the default)")
+
     # ---- frames and drawing ----
     def _textures(self, w: int, h: int):
         if self.tex and self.tex[0].size == (w, h):
@@ -669,6 +716,7 @@ class Viewer:
         u["c_back"].value = tuple(lens["back_center"])
         u["back_rot"].value = _gl_mat(_mul(_mul(_ry(y), _rx(p)), _rz(r)))
         u["seams"].value = int(self.seams)
+        u["blend"].value = math.radians(lens.get("blend", DEFAULT_LENS["blend"]))
         for i, t in enumerate(self.tex):
             t.use(i)
         self.vao.render(self.mgl.TRIANGLE_STRIP)
@@ -692,17 +740,21 @@ class Viewer:
                 seq, frame = src.latest()
                 if frame is not None and seq != shown and not self.paused:
                     self._upload(frame, src.width, src.height)
+                    self._keep_sample(frame, src.width, src.height, now, src.still)
                     shown, n_fps = seq, n_fps + 1
                 if now - t_fps >= 1.0:
                     if src.bytes_in:
                         mbit = (src.bytes_in - b_fps) * 8 / (now - t_fps) / 1e6
                         b_fps = src.bytes_in
                     fps, t_fps, n_fps = n_fps / (now - t_fps), now, 0
+                if self.calib:
+                    self._poll_calibration()
                 self._draw(src.width, src.height)
                 glfw.swap_buffers(self.win)
                 finish()
                 fov = f" {self.fov[self.mode]:.0f}°" if self.mode in self.fov else ""
-                state = ("paused" if self.paused else "ended" if src.ended and not src.still
+                state = ("calibrating…" if self.calib else "paused" if self.paused
+                         else "ended" if src.ended and not src.still
                          else "photo" if src.still else f"{fps:.0f} fps" + (f" {mbit:.1f} Mbit/s" if mbit else ""))
                 t = (f"{self.title} — {MODES[self.mode]}{fov}{' (level)' if self.level else ''} — {state} — "
                      f"lens {self.lens['fov']:.1f}° back {self.lens['back_ypr']}")
