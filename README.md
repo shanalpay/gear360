@@ -50,9 +50,12 @@ sudo -E python3 tools/native_session.py --then "shoot"
 ### 360° viewer
 `python3 -m g360 view PHOTO.jpg|VIDEO.mp4` works offline for the camera's own files (and `live --raw` captures).
 Left-drag turns the sphere in any direction (the picture follows the pointer; flick to spin), right-drag rolls,
-the wheel zooms. `V` cycles perspective / little planet / panorama / raw, `L` keeps the horizon level, `R` resets,
+the wheel zooms; on a touchpad pinch/spread zooms, on a touchscreen one finger turns and two pinch. `V` cycles perspective / little planet / panorama / raw, `L` keeps the horizon level, `R` resets,
 `F` fullscreen, `S` screenshot, `Space` pause. Lens calibration: `[` `]` field of view, `Ctrl+arrows` and `,` `.`
 back-lens alignment, `K` shows the blend band, `Ctrl+S` saves to `~/.config/g360/lens.json`.
+
+`python3 -m g360 install-desktop` (with `G360_LIBWSM` exported) adds the g360 icon and two app-menu entries:
+**Gear 360 Viewer** (also under Open With for JPEG/MP4 files) and **Gear 360 Live** (opens a terminal for sudo).
 
 ## Usage (phone relay mode)
 1. In Samsung's app, connect to the camera, open **Camera** until the preview appears, then switch to **Gallery**
@@ -83,6 +86,8 @@ in [NOTES.md](NOTES.md).
 | `g360/ttts.py` | demuxer for the live-stream container |
 | `g360/stream.py` | window / file / virtual-webcam outputs via ffmpeg |
 | `g360/viewer.py` | GPU-stitched interactive 360° viewer (moderngl + glfw) |
+| `g360/xgesture.py` | touchpad pinch and touchscreen input on X11 (XInput 2.2/2.4), which GLFW lacks |
+| `g360/icon.py` | the app icon (drawn by a shader) and the app-menu install |
 | `g360/transport.py` | HTTP directly or relayed through a phone's `curl` over adb |
 | `g360/bt.py` | Bluetooth identifiers and message types (protocol client in progress) |
 | `g360/elfemu.py` | minimal AArch64 shared-library runner (Unicorn) |

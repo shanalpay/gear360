@@ -10,7 +10,8 @@ and runs this with --direct. Phone relay: connect a phone running Samsung's Gear
   live --out FILE.mp4 [--seconds]  save the live view (HEVC, dual fisheye, no re-encode)
   live --raw FILE [--seconds]  save Samsung's untouched TTTS stream
   live --replay RAW --play     play a saved raw stream (no phone or camera needed; --view for 360°)
-  view FILE                    360° viewer for the camera's photos/videos or a saved stream (no camera needed)
+  view [FILE]                  360° viewer for the camera's photos/videos or a saved stream (no camera needed)
+  install-desktop              add the g360 icon and "Gear 360 Viewer" / "Gear 360 Live" to the app menu
   live --v4l2 /dev/video10     publish the live view as a virtual webcam (OBS)
   shoot                        take a photo
   record --seconds N           record a video on the camera's card, print the file URL
@@ -20,6 +21,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import subprocess
 import sys
 import time
 
@@ -77,16 +79,30 @@ def main(argv: list[str] | None = None) -> int:
     out.add_argument("--v4l2", metavar="DEVICE")
     lv.add_argument("--seconds", type=float, default=10.0, help="with --out / --raw")
     vw = sub.add_parser("view")
-    vw.add_argument("file", help="dual-fisheye photo/video from the camera, .hevc, or a raw stream from live --raw")
+    vw.add_argument("file", nargs="?",
+                    help="dual-fisheye photo/video from the camera, .hevc, or a raw stream from live --raw "
+                         "(omitted: choose one in a dialog)")
+    sub.add_parser("install-desktop")
     sub.add_parser("shoot")
     rc = sub.add_parser("record")
     rc.add_argument("--seconds", type=float, default=10.0)
     a = ap.parse_args(argv)
 
     log = lambda m: print(m, file=sys.stderr)
+    if a.cmd == "install-desktop":
+        from . import icon
+        return icon.install_desktop(log)
     if a.cmd == "view" or (a.cmd == "live" and a.replay and a.view):
         from . import viewer
-        return viewer.view_file(a.file if a.cmd == "view" else a.replay, log=log)
+        path = a.replay if a.cmd == "live" else a.file
+        if not path:
+            r = subprocess.run(["zenity", "--file-selection", "--title=Open a Gear 360 photo or video",
+                                "--file-filter=Gear 360 | *.jpg *.JPG *.jpeg *.mp4 *.MP4 *.hevc *.bin",
+                                "--file-filter=All files | *"], capture_output=True, text=True)
+            path = r.stdout.strip()
+            if not path:
+                return 1
+        return viewer.view_file(path, log=log)
     if a.cmd == "live" and a.replay:
         src = open(a.replay, "rb")
         print(f"replaying {a.replay}", file=sys.stderr)

@@ -8,6 +8,7 @@ Mouse (like dragging the picture on the phone):
   left drag          turn the sphere in any direction; the picture follows the pointer; a flick keeps it spinning
   right drag         roll
   wheel / + -        zoom
+Touchpad: pinch / spread zooms (moving the fingers also turns). Touchscreen: one finger turns, two pinch/spread.
 Keys:
   V                  view: perspective -> little planet -> panorama (equirectangular) -> raw dual fisheye
   L                  keep the horizon level (yaw/pitch only) instead of free rotation
@@ -37,7 +38,7 @@ import threading
 import time
 from typing import IO
 
-from . import ttts
+from . import icon, ttts
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or pathlib.Path.home() / ".config") / "g360" / "lens.json"
@@ -316,6 +317,9 @@ class Viewer:
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
         glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, True)
+        if hasattr(glfw, "X11_CLASS_NAME"):        # WM_CLASS, matched by the desktop entry (icon, name)
+            glfw.window_hint_string(glfw.X11_CLASS_NAME, icon.WM_CLASS)
+            glfw.window_hint_string(glfw.X11_INSTANCE_NAME, icon.WM_CLASS)
         self.win = glfw.create_window(1280, 720, title, None, None)
         if not self.win:
             glfw.terminate()
@@ -340,6 +344,18 @@ class Viewer:
         glfw.set_mouse_button_callback(self.win, self._on_button)
         glfw.set_scroll_callback(self.win, lambda w, dx, dy: self._zoom(0.9 ** dy))
         glfw.set_key_callback(self.win, self._on_key)
+        try:
+            glfw.set_window_icon(self.win, 5, icon.glfw_images(self.ctx))
+        except Exception as e:      # cosmetic only
+            log(f"viewer: no window icon ({e})")
+        self.touches: dict[int, tuple[float, float]] = {}
+        self.pinch_fov = None
+        self.gestures = None
+        try:
+            from .xgesture import XGestures
+            self.gestures = XGestures(glfw.get_x11_window(self.win), self._on_gesture)
+        except Exception:
+            pass
 
     # ---- view control ----
     def _rad_per_px(self):
@@ -372,21 +388,62 @@ class Viewer:
             self.drag = None
 
     def _on_move(self, win, x, y):
-        if not self.drag or self.mode == 3:
+        if not self.drag:
             return
         button, x0, y0 = self.drag
         self.drag = (button, x, y)
+        self._drag(x - x0, y - y0, roll=button == self.glfw.MOUSE_BUTTON_RIGHT)
+
+    def _drag(self, dx: float, dy: float, roll: bool = False):
+        """Pointer or finger moved by (dx, dy) window pixels while held: turn the view and track the speed for
+        a flick."""
+        if self.mode == 3:
+            return
         kx, ky = self._rad_per_px()
         now = time.monotonic()
         dt = max(now - self.last_move, 1e-3)
         self.last_move = now
-        if button == self.glfw.MOUSE_BUTTON_RIGHT:
-            d = (0.0, 0.0, (x - x0) * kx)
+        if roll:
+            d = (0.0, 0.0, dx * kx)
         else:   # grab: the picture follows the pointer, so the camera turns the other way
-            d = (-(x - x0) * kx, (y - y0) * ky, 0.0)
+            d = (-dx * kx, dy * ky, 0.0)
         self.turn(*d)
         a = min(dt / 0.05, 1.0)
         self.vel = tuple((1 - a) * v + a * di / dt for v, di in zip(self.vel, d))
+
+    def _on_gesture(self, kind: str, **e):
+        """Touchpad pinch (XI 2.4 gestures) and touchscreen fingers (XI touch events), from g360.xgesture."""
+        if kind == "pinch-begin":
+            self.pinch_fov, self.vel = self.fov.get(self.mode), (0.0, 0.0, 0.0)
+            self.last_move = time.monotonic()
+        elif kind == "pinch-update":
+            if self.pinch_fov is not None and e["scale"] > 0:       # spread (scale > 1) zooms in
+                lo, hi = FOV_LIMITS[self.mode]
+                self.fov[self.mode] = max(lo, min(hi, self.pinch_fov / e["scale"]))
+            self._drag(e["dx"], e["dy"])
+        elif kind == "pinch-end":
+            self.pinch_fov = None
+        elif kind == "touch-begin":
+            self.touches[e["id"]] = (e["x"], e["y"])
+            self.vel, self.last_move = (0.0, 0.0, 0.0), time.monotonic()
+        elif kind == "touch-update" and e["id"] in self.touches:
+            before = dict(self.touches)
+            self.touches[e["id"]] = (e["x"], e["y"])
+            if len(self.touches) == 1:
+                ox, oy = before[e["id"]]
+                self._drag(e["x"] - ox, e["y"] - oy)
+            else:                   # two fingers: pinch/spread zooms, moving them together turns
+                ids = sorted(self.touches)[:2]
+                (ax, ay), (bx, by) = (before[i] for i in ids)
+                (cx, cy), (dx, dy) = (self.touches[i] for i in ids)
+                d0, d1 = math.hypot(bx - ax, by - ay), math.hypot(dx - cx, dy - cy)
+                if d0 > 1 and d1 > 1:
+                    self._zoom(d0 / d1)
+                self._drag(((cx + dx) - (ax + bx)) / 2, ((cy + dy) - (ay + by)) / 2)
+        elif kind == "touch-end":
+            self.touches.pop(e["id"], None)
+            if not self.touches and time.monotonic() - self.last_move > 0.08:
+                self.vel = (0.0, 0.0, 0.0)
 
     def _zoom(self, factor: float):
         if self.mode in self.fov:
@@ -532,9 +589,11 @@ class Viewer:
         try:
             while not glfw.window_should_close(self.win):
                 glfw.poll_events()
+                if self.gestures:
+                    self.gestures.poll()
                 now = time.monotonic()
                 dt, t_prev = now - t_prev, now
-                if not self.drag and any(abs(v) > 1e-3 for v in self.vel):     # flick: keep turning, slowing down
+                if not self.drag and not self.touches and any(abs(v) > 1e-3 for v in self.vel):     # flick: keep turning, slowing down
                     self.turn(*(v * dt for v in self.vel))
                     self.vel = tuple(v * math.exp(-2.5 * dt) for v in self.vel)
                 seq, frame = src.latest()
@@ -557,6 +616,8 @@ class Viewer:
             pass
         finally:
             src.close()
+            if self.gestures:
+                self.gestures.close()
             glfw.terminate()
         return 0
 
