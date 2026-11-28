@@ -67,7 +67,7 @@ Bluetooth name "Gear 360 (xxxx)" (last 4 hex digits of the BT MAC); Wi-Fi `B0:72
 Wi-Fi Direct `B2:72:BF:xx:xx:xx` (Wi-Fi MAC with the locally-administered bit set), SSID "Gear 360(xx:xx:xx)",
 **channel 1** (2412 MHz); model-version `C200GLU0AQF1_0.83`; board-revision 0.4.
 P2P provision-discovery response carries Samsung extension `static_ip=0x2931a8c0` = 192.168.49.41
-(but in session 2 the camera used 192.168.49.10).
+(but in session 2 the camera used 192.168.49.10, the address the phone's own PD request gave it; see below).
 
 ### SAP bring-up (logcat tags SAPeerDescriptionManager / SASecurityManager / SACapabilityManager)
 RFCOMM UUID **`a49eb41e-cb06-495c-9f4f-aa80a90cdf4a`** → Peer Description (PD) v2.1, peer version 0x201 (513)
@@ -261,6 +261,17 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   freq=5745` (PC = GO, camera client, PBC). The group then failed: `Failed to set channel (freq=5745): -22` —
   the Intel card cannot start a GO on that 5 GHz channel without an existing connection there. native_session
   now forces the group onto 2412 MHz (the camera's channel) in `own` mode (`--freq`).
+
+- **Group up on 2412 MHz (2026-11-27):** WPS PBC (`WPS-REG-SUCCESS`), `P2P-GROUP-STARTED … GO freq=2412`,
+  `EAPOL-4WAY-HS-COMPLETED`, `AP-STA-CONNECTED b2:72:bf:f0:9d:41`: the camera joined the PC's group natively.
+  It then never sent a DHCP request and did not answer at 192.168.49.10. Reason: **Samsung "static IP"
+  vendor element** (OUI `00:00:f0`, type `0x0a`, 16-bit length 4, IPv4 bytes reversed):
+  `dd 0b 00 00 f0 0a 00 00 04 0a 31 a8 c0` = 192.168.49.10. The S8+'s supplicant puts it in its Provision
+  Discovery Request (`P2P: Static IP * --> ip: a31a8c0`) and the camera takes that address and skips DHCP
+  (the phone's dnsmasq range was .100-.199, yet the camera sat at .10; afterwards the phone runs
+  `p2pSetCmd(static_ip, 192.168.49.11)` for the next peer). The camera's PD response carries its own
+  `0x0a` element with .41 and a 64-byte type `0x11` element. native_session now adds the element to our PD
+  request (`VENDOR_ELEM_ADD 4 …`, `--cam-ip`), and takes the address from the camera's `device-desc-url`.
 
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**

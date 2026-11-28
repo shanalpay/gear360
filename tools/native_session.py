@@ -42,7 +42,7 @@ for sp in glob.glob(str(ROOT / ".venv/lib/python3*/site-packages")):
 from g360 import bluez, jsonmsg, sap, wsm  # noqa: E402
 from g360 import p2p as p2pmod  # noqa: E402
 from g360.transport import DirectTransport  # noqa: E402
-from g360.upnp import Camera  # noqa: E402
+from g360.upnp import DEFAULT_IP, Camera  # noqa: E402
 
 
 def p2p_device_addr() -> str:
@@ -57,8 +57,15 @@ def p2p_device_addr() -> str:
 NOISY = ("CTRL-EVENT-SCAN-STARTED", "CTRL-EVENT-SCAN-RESULTS", "CTRL-EVENT-BSS-", "CTRL-EVENT-REGDOM")
 
 
+def static_ip_ie(ip: str) -> str:
+    """Samsung's "static IP" vendor element (OUI 00:00:f0, type 0x0a, 16-bit length 4, address bytes reversed),
+    as the S8+ put in its Provision Discovery Request. The camera skips DHCP and takes this address; without it
+    the camera picks one itself (it offers 192.168.49.41 in its PD response) and never asks for a lease."""
+    return "dd0b0000f00a000004" + bytes(reversed([int(x) for x in ip.split(".")])).hex()
+
+
 def wpa_connect(peer: str, log, timeout: float = 60, iface: str | None = None, ctrl_dir: str | None = None,
-                debug_to_journal: bool = True, freq: int | None = None) -> str | None:
+                debug_to_journal: bool = True, freq: int | None = None, cam_ip: str | None = None) -> str | None:
     """Root only: drive wpa_supplicant's P2P directly over its control socket (NetworkManager's instance by
     default, or our private one), log every event, and return the group interface name if a group starts.
     GO intent 7 as in app 1.4 (`groupOwnerIntent = 7`); the camera bids 1, so this PC becomes GO, as the phone did. The camera is matched by its announced
@@ -68,20 +75,25 @@ def wpa_connect(peer: str, log, timeout: float = 60, iface: str | None = None, c
         w.attach()
         log(f"wpa_supplicant control socket {w.iface}: attached")
         if not debug_to_journal:
-            return _wpa_connect(w, peer, log, timeout, freq)
+            return _wpa_connect(w, peer, log, timeout, freq, cam_ip)
         prev = re.search(r"Current level: (\w+)", w.request("LOG_LEVEL"))
         prev = prev.group(1) if prev else "INFO"
         w.request("LOG_LEVEL DEBUG")     # NetworkManager's wpa_supplicant logs to syslog (-s): the journal
         log(f"wpa_supplicant debug logging on (was {prev}): journalctl -u wpa_supplicant shows GO negotiation")
         try:
-            return _wpa_connect(w, peer, log, timeout, freq)
+            return _wpa_connect(w, peer, log, timeout, freq, cam_ip)
         finally:
             w.request(f"LOG_LEVEL {prev}")
 
 
-def _wpa_connect(w, peer: str, log, timeout: float, freq: int | None = None) -> str | None:
+def _wpa_connect(w, peer: str, log, timeout: float, freq: int | None = None,
+                 cam_ip: str | None = None) -> str | None:
     st = dict(l.split("=", 1) for l in w.request("STATUS").splitlines() if "=" in l)
     log(f"wpa: STATUS p2p_device_address={st.get('p2p_device_address')} wpa_state={st.get('wpa_state')}")
+    w.request("VENDOR_ELEM_REMOVE 4 *")
+    if cam_ip:      # 4 = VENDOR_ELEM_P2P_PD_REQ
+        ie = static_ip_ie(cam_ip)
+        log(f"wpa: VENDOR_ELEM_ADD 4 {ie} (camera address {cam_ip}) -> {w.request(f'VENDOR_ELEM_ADD 4 {ie}')}")
     log(f"wpa: P2P_FIND 30 -> {w.request('P2P_FIND 30')}")
     # As Samsung's phone does: provision discovery (PBC) first, then GO negotiation. The camera answers our
     # GO Negotiation Request with status 1 and then, prompted by the provision discovery, sends its own
@@ -151,6 +163,7 @@ def wpa_cleanup(iface: str | None = None, ctrl_dir: str | None = None):
         with WpaCtrl(iface, ctrl_dir) as w:
             w.request("P2P_GROUP_REMOVE *")
             w.request("P2P_CANCEL")
+            w.request("VENDOR_ELEM_REMOVE 4 *")
     except (OSError, TimeoutError):
         pass
 
@@ -224,9 +237,22 @@ def session(a, log, host: str, cam: str, announce: str, wpa: dict) -> int:
             ipinfo = subprocess.run(["ip", "-4", "-br", "addr"], capture_output=True, text=True).stdout
             log("interfaces: " + "; ".join(l for l in ipinfo.splitlines() if "192.168.49." in l or "p2p" in l))
 
-            camera = Camera(DirectTransport())
+            # The camera reports its UPnP description URL over Bluetooth once it is on Wi-Fi: use its host.
+            for _ in range(20):
+                if state["desc_url"]:
+                    break
+                time.sleep(0.5)
+            ip = a.cam_ip
+            m = re.search(r"//([\d.]+)", state["desc_url"] or "")
+            if m:
+                ip = m.group(1)
+            else:
+                log(f"no device-desc-url from the camera yet; trying {ip}")
+            camera = Camera(DirectTransport(), ip=ip)
             if not camera.wait_ready(45, log=log):
-                log("camera not reachable over Wi-Fi")
+                neigh = subprocess.run(["ip", "neigh"], capture_output=True, text=True).stdout
+                log(f"camera not reachable over Wi-Fi at {ip}; neighbours: "
+                    + "; ".join(l for l in neigh.splitlines() if "192.168.49." in l))
                 return 5
             log("camera reachable over Wi-Fi Direct - switching to live view")
             caps = camera.enter_live_view()
@@ -256,6 +282,8 @@ def main() -> int:
     ap.add_argument("--freq", type=int, default=None,
                     help="force the group's channel in MHz (default for --p2p own: 2412, the camera's channel; "
                          "Intel cards cannot start a GO on most 5 GHz channels unless already connected there)")
+    ap.add_argument("--cam-ip", default=DEFAULT_IP,
+                    help=f"address handed to the camera in provision discovery (default {DEFAULT_IP}, as the phone does)")
     ap.add_argument("--profile", default="gear360-p2p")
     ap.add_argument("--hold", type=float, default=60, help="seconds to keep the session up after success")
     a = ap.parse_args()
@@ -267,7 +295,15 @@ def main() -> int:
         return 4
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))    # so cleanup runs on kill too
     t0 = time.monotonic()
-    log = lambda m: print(f"[{time.monotonic() - t0:6.2f}s] {m}", flush=True)
+    (ROOT / "tmp").mkdir(exist_ok=True)
+    logf = open(ROOT / "tmp" / "native_session.log", "w")
+    os.chmod(logf.name, 0o644)
+
+    def log(m):
+        line = f"[{time.monotonic() - t0:6.2f}s] {m}"
+        print(line, flush=True)
+        logf.write(line + "\n")
+        logf.flush()
 
     host, cam = bluez.addresses(a.camera)
     with contextlib.ExitStack() as stack:
@@ -277,11 +313,12 @@ def main() -> int:
             (ROOT / "tmp").mkdir(exist_ok=True)
             ws = stack.enter_context(p2pmod.OwnSupplicant(iface, log=log, logfile=str(ROOT / "tmp" / "wpa_own.log")))
             announce = a.announce or ws.perm
-            wpa = {"iface": ws.iface, "ctrl_dir": ws.ctrl_dir, "debug_to_journal": False, "freq": a.freq or 2412}
+            wpa = {"iface": ws.iface, "ctrl_dir": ws.ctrl_dir, "debug_to_journal": False, "freq": a.freq or 2412,
+                   "cam_ip": a.cam_ip}
         else:
             announce = a.announce or p2p_device_addr()
-            if a.p2p == "wpacli" and a.freq:
-                wpa = {"freq": a.freq}
+            if a.p2p == "wpacli":
+                wpa = {"freq": a.freq, "cam_ip": a.cam_ip}
         log(f"host {host}  camera {cam}  announcing wifi-mac-address {announce}")
         rc = session(a, log, host, cam, announce, wpa)
     log(f"done (exit {rc})")
