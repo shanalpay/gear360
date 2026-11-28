@@ -41,6 +41,8 @@ model_name=g360
 config_methods=push_button virtual_push_button
 p2p_go_intent=7
 p2p_no_group_iface=1
+p2p_listen_reg_class=81
+p2p_listen_channel=1
 """
 
 
@@ -58,6 +60,10 @@ def perm_addr(iface: str) -> str:
 
 def _run(*cmd):
     return subprocess.run(list(cmd), capture_output=True, text=True)
+
+
+# Listen on channel 1, the camera's channel: after answering our GO Negotiation Request with status 1 the camera
+# sends its own request to our Listen channel, and wpa_supplicant otherwise picks 1, 6 or 11 at random.
 
 
 class OwnSupplicant:

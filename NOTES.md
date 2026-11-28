@@ -272,6 +272,11 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   `p2pSetCmd(static_ip, 192.168.49.11)` for the next peer). The camera's PD response carries its own
   `0x0a` element with .41 and a 64-byte type `0x11` element. native_session now adds the element to our PD
   request (`VENDOR_ELEM_ADD 4 …`, `--cam-ip`), and takes the address from the camera's `device-desc-url`.
+- Next run: status 1 again but **no camera-initiated request** (60 s in WAIT_PEER_CONNECT). Our Listen channel
+  was 6 (2437 MHz; wpa_supplicant picks 1/6/11 at random) and the camera sits on channel 1; in the runs that
+  worked its request came 18 ms after its status 1. The private supplicant now listens on channel 1
+  (`p2p_listen_reg_class=81`, `p2p_listen_channel=1`), and native_session retries PD + GO negotiation if the
+  camera's request has not come within 12 s.
 
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**

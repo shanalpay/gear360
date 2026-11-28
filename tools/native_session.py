@@ -102,7 +102,8 @@ def _wpa_connect(w, peer: str, log, timeout: float, freq: int | None = None,
     phase = "find"           # find -> pd -> connect
     t_start = time.monotonic()
     t_end = t_start + timeout
-    t_pd = 0.0
+    t_pd = t_conn = 0.0
+    attempts, negotiated = 0, False
 
     def provision(addr):
         nonlocal phase, cam, t_pd
@@ -110,20 +111,26 @@ def _wpa_connect(w, peer: str, log, timeout: float, freq: int | None = None,
         log(f"wpa: P2P_PROV_DISC {addr} pbc -> {w.request(f'P2P_PROV_DISC {addr} pbc')}")
 
     def connect():
-        nonlocal phase
-        phase = "connect"
+        nonlocal phase, t_conn, attempts
+        phase, t_conn, attempts = "connect", time.monotonic(), attempts + 1
         cmd = f"P2P_CONNECT {cam} pbc go_intent=7" + (f" freq={freq}" if freq else "")
         log(f"wpa: {cmd} -> {w.request(cmd)}")
 
     while time.monotonic() < t_end:
         ev = w.event(1.0)
+        now = time.monotonic()
+        if phase == "find" and now - t_start > 10:
+            log("camera not seen in discovery after 10 s; trying its announced address anyway")
+            provision(target)
+        elif phase == "pd" and now - t_pd > 5:
+            log("no provision discovery response in 5 s; starting GO negotiation anyway")
+            connect()
+        elif phase == "connect" and not negotiated and now - t_conn > 12 and attempts < 4:
+            # The camera answers status 1 and normally sends its own request within ~20 ms; if it did not,
+            # start over with a fresh provision discovery.
+            log(f"no GO negotiation from the camera after 12 s; P2P_CANCEL -> {w.request('P2P_CANCEL')}, retrying")
+            provision(cam)
         if ev is None:
-            if phase == "find" and time.monotonic() - t_start > 10:
-                log("camera not seen in discovery after 10 s; trying its announced address anyway")
-                provision(target)
-            elif phase == "pd" and time.monotonic() - t_pd > 5:
-                log("no provision discovery response in 5 s; starting GO negotiation anyway")
-                connect()
             continue
         if ev.startswith(NOISY):
             continue
@@ -143,6 +150,8 @@ def _wpa_connect(w, peer: str, log, timeout: float, freq: int | None = None,
         log(f"wpa: {ev}")
         if phase == "pd" and ev.startswith(("P2P-PROV-DISC-PBC-RESP", "P2P-PROV-DISC-FAILURE")):
             connect()
+        elif ev.startswith("P2P-GO-NEG-SUCCESS"):
+            negotiated = True
         elif ev.startswith("P2P-GROUP-STARTED"):
             group = ev.split()[1]
             break
