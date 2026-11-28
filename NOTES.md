@@ -277,6 +277,10 @@ Frame = `u16 BE length` + body (some frames end in a 2-byte CRC; the log says "S
   worked its request came 18 ms after its status 1. The private supplicant now listens on channel 1
   (`p2p_listen_reg_class=81`, `p2p_listen_channel=1`), and native_session retries PD + GO negotiation if the
   camera's request has not come within 12 s.
+- **Native control works (2026-11-27), no phone:** with Listen channel 1 and the static-IP element, one run
+  went BT session → mobilelink → PD → GO-NEG-SUCCESS (0.2 s) → WPS → group up on 2412 MHz →
+  `device-desc-url http://192.168.49.10:7676/smp_2_` over BT (0.9 s later) → UPnP 200 → changeToRVF →
+  `GetInfomation`: 2560x1280 stream at `http://192.168.49.10:7679/livestream_high.avi`. 12.6 s end to end.
 
 ## Hardware tests of the g360 app (via a phone relaying HTTP over adb)
 - **UPnP servers return 503 unless `User-Agent` starts with `SEC_RVF_ML_` + at least one character**
